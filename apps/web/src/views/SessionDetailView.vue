@@ -12,7 +12,7 @@ interface Media {
   sampleRate: number | null; channels: number | null; peaks: number[] | null; failureMessage: string | null;
 }
 interface Annotation { id: string; mediaId: string; type: "RHYTHM" | "FINGERING" | "EMOTION"; title: string; severity: number; startMs: number; endMs: number; description: string | null; nextAction: string | null }
-interface Goal { id: string; title: string; category: string; targetValue: number; baselineValue: number | null; unit: string; dueDate: string; status: string; progresses: Array<{ id: string; actualValue: number; note: string | null; recordedAt: string }> }
+interface Goal { id: string; title: string; category: string; metricDirection: "UP" | "DOWN"; targetValue: number; baselineValue: number | null; unit: string; dueDate: string; status: string; progresses: Array<{ id: string; actualValue: number; note: string | null; revisionReason: string | null; recordedAt: string; evidenceMedia: { id: string; originalName: string } | null }> }
 interface Session {
   id: string; title: string; instrument: string; focus: string | null; location: string | null; notes: string | null; status: string; startedAt: string;
   completedAt: string | null; actualDurationMs: number; mediaAssets: Media[]; annotations: Annotation[]; goals: Goal[];
@@ -160,10 +160,13 @@ onMounted(load);
             <div v-if="session.goals.length" class="stack">
               <div v-for="goal in session.goals" :key="goal.id" class="goal-detail">
                 <div class="row between"><strong>{{ goal.title }}</strong><StatusBadge :value="goal.status" kind="goal" /></div>
-                <small>目标 {{ goal.targetValue }} {{ goal.unit }} · 截止 {{ goal.dueDate.slice(0, 10) }}</small>
+                <small>目标 {{ goal.targetValue }} {{ goal.unit }}（{{ goal.metricDirection === "DOWN" ? "越小越好" : "越大越好" }}） · 截止 {{ goal.dueDate.slice(0, 10) }}</small>
                 <div v-if="goal.progresses.length">
                   <div v-for="progress in goal.progresses" :key="progress.id" class="progress-record">
-                    <span>{{ progress.actualValue }} {{ goal.unit }}</span><small>{{ formatDateTime(progress.recordedAt) }} · {{ progress.note || "无备注" }}</small>
+                    <span>{{ progress.actualValue }} {{ goal.unit }}</span>
+                    <small>{{ formatDateTime(progress.recordedAt) }} · {{ progress.note || "无备注" }}</small>
+                    <small v-if="progress.evidenceMedia">证据音频：{{ progress.evidenceMedia.originalName }}</small>
+                    <small v-if="progress.revisionReason">修订原因：{{ progress.revisionReason }}</small>
                   </div>
                 </div>
                 <small v-else>尚无进度记录</small>

@@ -38,6 +38,8 @@ export const METRIC_TYPES = [
 ] as const;
 export const EVIDENCE_REQUIREMENTS = ["NONE", "AUDIO", "SELF_REVIEW", "AUDIO_AND_SELF_REVIEW"] as const;
 export const GOAL_STATUSES = ["OPEN", "IN_PROGRESS", "ACHIEVED", "MISSED", "CANCELLED"] as const;
+export const METRIC_DIRECTIONS = ["UP", "DOWN"] as const;
+export const PROGRESS_TRENDS = ["IMPROVING", "FLAT", "REGRESSING"] as const;
 
 const requiredText = (label: string, max: number) =>
   z.string().trim().min(1, `${label}不能为空`).max(max, `${label}不能超过 ${max} 个字符`);
@@ -144,6 +146,7 @@ export const goalCreateSchema = z.object({
   title: requiredText("目标标题", 160),
   category: z.enum(GOAL_CATEGORIES),
   metricType: z.enum(METRIC_TYPES),
+  metricDirection: z.enum(METRIC_DIRECTIONS).optional(),
   baselineValue: z.coerce.number().finite().optional().nullable(),
   targetValue: z.coerce.number().finite(),
   unit: requiredText("单位", 24),
@@ -168,12 +171,16 @@ export const goalProgressCreateSchema = z.object({
   actualValue: z.coerce.number().finite(),
   note: optionalText(1000, "进度备注"),
   evidenceMediaId: z.string().uuid().optional().nullable(),
+  revisionReason: optionalText(1000, "修订原因"),
   recordedAt: z.coerce.date().optional(),
 });
 export const goalCancelSchema = z.object({ reason: requiredText("取消原因", 1000) });
 export const goalActivateSchema = z.object({
   dueDate: z.coerce.date().optional(),
   targetValue: z.coerce.number().finite().optional(),
+});
+export const goalCompleteSchema = z.object({
+  revisionReason: optionalText(1000, "修订原因"),
 });
 
 export const completionGoalProgressSchema = goalProgressCreateSchema.omit({ sessionId: true }).extend({
@@ -210,6 +217,77 @@ export type GoalCategory = (typeof GOAL_CATEGORIES)[number];
 export type MetricType = (typeof METRIC_TYPES)[number];
 export type GoalStatus = (typeof GOAL_STATUSES)[number];
 export type EvidenceRequirement = (typeof EVIDENCE_REQUIREMENTS)[number];
+export type MetricDirection = (typeof METRIC_DIRECTIONS)[number];
+export type ProgressTrend = (typeof PROGRESS_TRENDS)[number];
+
+/**
+ * 指标方向：数值越小越好（如错音数、失误次数、完成用时）默认 DOWN，其余默认 UP。
+ */
+export function defaultMetricDirectionForType(metricType: MetricType): MetricDirection {
+  return metricType === "COUNT" ? "DOWN" : "UP";
+}
+
+export function isTargetReached(input: {
+  actualValue: number;
+  targetValue: number;
+  metricDirection: MetricDirection;
+}): boolean {
+  if (!Number.isFinite(input.actualValue) || !Number.isFinite(input.targetValue)) return false;
+  return input.metricDirection === "DOWN"
+    ? input.actualValue <= input.targetValue
+    : input.actualValue >= input.targetValue;
+}
+
+/** 兼容旧调用：旧目标没有方向字段时按“越大越好”判定。 */
+export function isGoalProgressValid(actualValue: number, targetValue: number): boolean {
+  return isTargetReached({ actualValue, targetValue, metricDirection: "UP" });
+}
+
+/**
+ * 按指标方向比较两个数值：正向 >0 表示沿目标方向改善，<0 表示背离目标方向。
+ */
+export function compareByDirection(
+  current: number,
+  previous: number,
+  metricDirection: MetricDirection,
+): number {
+  const delta = current - previous;
+  return metricDirection === "DOWN" ? -delta : delta;
+}
+
+export function classifyProgressTrend(input: {
+  currentValue: number;
+  previousValue?: number | null;
+  metricDirection: MetricDirection;
+  tolerance?: number;
+}): ProgressTrend {
+  if (input.previousValue == null || !Number.isFinite(input.previousValue)) return "FLAT";
+  const delta = compareByDirection(input.currentValue, input.previousValue, input.metricDirection);
+  const tolerance = input.tolerance ?? 0;
+  if (delta > tolerance) return "IMPROVING";
+  if (delta < -tolerance) return "REGRESSING";
+  return "FLAT";
+}
+
+/**
+ * 证据要求校验：AUDIO* 必须提供证据音频，SELF_REVIEW* 必须填写自评/修订说明。
+ */
+export function missingGoalEvidence(input: {
+  evidenceRequirement: EvidenceRequirement;
+  evidenceMediaId?: string | null;
+  note?: string | null;
+  revisionReason?: string | null;
+}): string[] {
+  const missing: string[] = [];
+  const needsAudio = input.evidenceRequirement === "AUDIO" || input.evidenceRequirement === "AUDIO_AND_SELF_REVIEW";
+  const needsSelfReview =
+    input.evidenceRequirement === "SELF_REVIEW" || input.evidenceRequirement === "AUDIO_AND_SELF_REVIEW";
+  if (needsAudio && !input.evidenceMediaId) missing.push("该目标要求上传证据音频");
+  if (needsSelfReview && !input.note?.trim() && !input.revisionReason?.trim()) {
+    missing.push("该目标要求填写自评说明");
+  }
+  return missing;
+}
 
 export interface ApiErrorBody {
   error: {
@@ -251,10 +329,6 @@ export function validateAnnotationRange(
     return { ok: false, code: "AUDIO_RANGE_INVALID", message: "标记结束时间不能超出音频时长" };
   }
   return { ok: true };
-}
-
-export function isGoalProgressValid(actualValue: number, targetValue: number): boolean {
-  return Number.isFinite(actualValue) && Number.isFinite(targetValue) && actualValue >= targetValue;
 }
 
 export function calculateSessionDuration(mediaDurationsMs: Array<number | null | undefined>): number {

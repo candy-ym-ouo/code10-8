@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import {
   goalActivateSchema,
   goalCancelSchema,
+  goalCompleteSchema,
   goalCreateSchema,
   goalListQuerySchema,
   goalProgressCreateSchema,
@@ -11,18 +12,7 @@ import { AppError, notFound } from "../lib/errors.js";
 import { prisma } from "../lib/prisma.js";
 import { parseOrThrow } from "../lib/validation.js";
 import { audit } from "../lib/audit.js";
-
-const goalInclude = {
-  sourceSession: { select: { id: true, title: true, instrument: true, startedAt: true } },
-  annotation: true,
-  progresses: {
-    orderBy: { recordedAt: "desc" as const },
-    include: {
-      session: { select: { id: true, title: true, startedAt: true } },
-      evidenceMedia: { select: { id: true, originalName: true, status: true } },
-    },
-  },
-} as const;
+import { appendGoalProgress, confirmGoalAchieved, goalInclude, resolveMetricDirection } from "../services/goal-service.js";
 
 const goalRoutes: FastifyPluginAsync = async (app) => {
   app.addHook("preHandler", app.authenticate);
@@ -73,6 +63,7 @@ const goalRoutes: FastifyPluginAsync = async (app) => {
         title: input.title,
         category: input.category,
         metricType: input.metricType,
+        metricDirection: resolveMetricDirection(input.metricType, input.metricDirection),
         baselineValue: input.baselineValue ?? null,
         targetValue: input.targetValue,
         unit: input.unit,
@@ -111,6 +102,9 @@ const goalRoutes: FastifyPluginAsync = async (app) => {
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.category === undefined ? {} : { category: input.category }),
         ...(input.metricType === undefined ? {} : { metricType: input.metricType }),
+        ...(input.metricDirection === undefined
+          ? {}
+          : { metricDirection: resolveMetricDirection(input.metricType ?? existing.metricType, input.metricDirection) }),
         ...(input.baselineValue === undefined ? {} : { baselineValue: input.baselineValue }),
         ...(input.targetValue === undefined ? {} : { targetValue: input.targetValue }),
         ...(input.unit === undefined ? {} : { unit: input.unit }),
@@ -167,17 +161,11 @@ const goalRoutes: FastifyPluginAsync = async (app) => {
 
   app.post("/:id/complete", async (request) => {
     const { id } = request.params as { id: string };
-    const existing = await prisma.goal.findFirst({ where: { id, userId: request.authUser!.id } });
-    if (!existing) throw notFound();
-    if (["CANCELLED", "ACHIEVED"].includes(existing.status)) {
-      throw new AppError(409, "INVALID_GOAL_STATE", "当前目标不能确认完成");
-    }
-    const goal = await prisma.goal.update({
-      where: { id },
-      data: { status: "ACHIEVED", completedAt: new Date(), version: { increment: 1 } },
-      include: goalInclude,
+    const input = parseOrThrow(goalCompleteSchema, request.body ?? {});
+    const goal = await confirmGoalAchieved(request.authUser!.id, id, input.revisionReason);
+    await audit(request, "GOAL_COMPLETED", "GOAL", id, "SUCCESS", {
+      revisionReason: input.revisionReason ?? null,
     });
-    await audit(request, "GOAL_COMPLETED", "GOAL", id, "SUCCESS");
     return { goal };
   });
 
@@ -205,8 +193,9 @@ const goalRoutes: FastifyPluginAsync = async (app) => {
     ]);
     if (!goal) throw notFound();
     if (!session) throw new AppError(400, "VALIDATION_ERROR", "进度关联的练习不存在");
-    if (["CANCELLED", "ACHIEVED"].includes(goal.status)) {
-      throw new AppError(409, "INVALID_GOAL_STATE", "已取消或已完成目标不能新增进度");
+    // 与逾期扫描口径一致：扫描只移动 OPEN/IN_PROGRESS，因此进度也只能写入这两个状态。
+    if (!["OPEN", "IN_PROGRESS"].includes(goal.status)) {
+      throw new AppError(409, "INVALID_GOAL_STATE", "已取消、已达成或已逾期目标不能新增进度；逾期目标请先重新激活");
     }
     if (input.evidenceMediaId) {
       const evidence = await prisma.mediaAsset.findFirst({
@@ -216,21 +205,26 @@ const goalRoutes: FastifyPluginAsync = async (app) => {
       if (!evidence) throw new AppError(400, "VALIDATION_ERROR", "证据音频必须来自关联练习且已就绪");
     }
     const progress = await prisma.$transaction(async (tx) => {
-      const created = await tx.goalProgress.create({
-        data: {
-          userId: request.authUser!.id,
-          goalId: id,
-          sessionId: input.sessionId,
-          actualValue: input.actualValue,
-          note: input.note ?? null,
-          evidenceMediaId: input.evidenceMediaId ?? null,
-          recordedAt: input.recordedAt ?? new Date(),
+      const result = await appendGoalProgress(tx, {
+        userId: request.authUser!.id,
+        goal,
+        sessionId: input.sessionId,
+        actualValue: input.actualValue,
+        note: input.note,
+        evidenceMediaId: input.evidenceMediaId,
+        revisionReason: input.revisionReason,
+        recordedAt: input.recordedAt,
+      });
+      return tx.goalProgress.findUniqueOrThrow({
+        where: { id: result.progressId },
+        include: {
+          session: { select: { id: true, title: true, startedAt: true } },
+          evidenceMedia: { select: { id: true, originalName: true, status: true } },
         },
       });
-      if (goal.status === "OPEN") await tx.goal.update({ where: { id }, data: { status: "IN_PROGRESS", version: { increment: 1 } } });
-      return created;
     });
-    return reply.status(201).send({ progress });
+    const refreshed = await prisma.goal.findUniqueOrThrow({ where: { id }, include: goalInclude });
+    return reply.status(201).send({ progress, goal: refreshed });
   });
 };
 

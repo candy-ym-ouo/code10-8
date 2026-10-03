@@ -2,6 +2,7 @@ import { Prisma, SessionStatus } from "@prisma/client";
 import {
   calculateSessionDuration,
   describeMissingReview,
+  missingGoalEvidence,
   type SessionStatus as ContractSessionStatus,
 } from "@practice/contracts";
 import type { z } from "zod";
@@ -9,6 +10,7 @@ import type { completionSchema, sessionListQuerySchema } from "@practice/contrac
 import { AppError, notFound } from "../lib/errors.js";
 import { prisma } from "../lib/prisma.js";
 import { enqueueCleanup } from "../lib/queue.js";
+import { appendGoalProgress, resolveMetricDirection } from "./goal-service.js";
 
 export const sessionInclude = {
   mediaAssets: {
@@ -232,9 +234,9 @@ export async function completeSession(
       annotations: { select: { id: true } },
       goals: {
         where: { status: { in: ["OPEN", "IN_PROGRESS"] } },
-        select: { id: true },
+        select: { id: true, evidenceRequirement: true },
       },
-      goalProgresses: { where: { sessionId }, select: { id: true } },
+      goalProgresses: { where: { sessionId }, select: { id: true, goalId: true } },
       review: true,
     },
   });
@@ -255,18 +257,36 @@ export async function completeSession(
 
   const annotationIds = new Set(session.annotations.map((item) => item.id));
   const readyMediaIds = new Set(session.mediaAssets.map((item) => item.id));
-  const openGoalIds = new Set(session.goals.map((item) => item.id));
+  const openGoalMap = new Map(session.goals.map((item) => [item.id, item]));
+  const progressedGoalIds = new Set(session.goalProgresses.map((item) => item.goalId));
   for (const goal of input.goalCreates) {
     if (goal.annotationId && !annotationIds.has(goal.annotationId)) {
       throw new AppError(400, "VALIDATION_ERROR", "目标关联的标记不属于当前练习");
     }
   }
   for (const progress of input.goalProgressUpdates) {
-    if (!openGoalIds.has(progress.goalId)) {
+    const goal = openGoalMap.get(progress.goalId);
+    if (!goal) {
       throw new AppError(400, "VALIDATION_ERROR", "进度记录关联的开放目标不存在");
     }
     if (progress.evidenceMediaId && !readyMediaIds.has(progress.evidenceMediaId)) {
       throw new AppError(400, "VALIDATION_ERROR", "证据音频必须来自当前练习且已就绪");
+    }
+    const missingEvidence = missingGoalEvidence({
+      evidenceRequirement: goal.evidenceRequirement,
+      evidenceMediaId: progress.evidenceMediaId,
+      note: progress.note,
+      revisionReason: progress.revisionReason,
+    });
+    if (missingEvidence.length > 0) {
+      throw new AppError(400, "GOAL_EVIDENCE_REQUIRED", "目标证据要求未满足", missingEvidence);
+    }
+    if (progressedGoalIds.has(progress.goalId) && !progress.revisionReason?.trim()) {
+      throw new AppError(
+        409,
+        "REVISION_REASON_REQUIRED",
+        "该目标在本次练习已有进度记录，重复记录会追加保留，请填写修订原因后再提交",
+      );
     }
   }
 
@@ -320,6 +340,7 @@ export async function completeSession(
           title: goal.title,
           category: goal.category,
           metricType: goal.metricType,
+          metricDirection: resolveMetricDirection(goal.metricType, goal.metricDirection),
           baselineValue: goal.baselineValue ?? null,
           targetValue: goal.targetValue,
           unit: goal.unit,
@@ -330,21 +351,24 @@ export async function completeSession(
       });
     }
 
+    const activeGoals = await tx.goal.findMany({
+      where: { id: { in: input.goalProgressUpdates.map((progress) => progress.goalId) } },
+    });
+    const activeGoalMap = new Map(activeGoals.map((goal) => [goal.id, goal]));
     for (const progress of input.goalProgressUpdates) {
-      await tx.goalProgress.create({
-        data: {
-          userId,
-          goalId: progress.goalId,
-          sessionId,
-          actualValue: progress.actualValue,
-          note: progress.note ?? null,
-          evidenceMediaId: progress.evidenceMediaId ?? null,
-          recordedAt: progress.recordedAt ?? now,
-        },
-      });
-      await tx.goal.update({
-        where: { id: progress.goalId },
-        data: { status: "IN_PROGRESS", version: { increment: 1 } },
+      const goal = activeGoalMap.get(progress.goalId);
+      if (!goal || !["OPEN", "IN_PROGRESS"].includes(goal.status)) {
+        throw new AppError(409, "INVALID_GOAL_STATE", "进度记录关联的开放目标不存在");
+      }
+      await appendGoalProgress(tx, {
+        userId,
+        goal,
+        sessionId,
+        actualValue: progress.actualValue,
+        note: progress.note,
+        evidenceMediaId: progress.evidenceMediaId,
+        revisionReason: progress.revisionReason,
+        recordedAt: progress.recordedAt ?? now,
       });
     }
   });

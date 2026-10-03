@@ -110,9 +110,34 @@ Refresh Cookie 路径为 `/api/v1/auth`，生产环境在 HTTPS 下自动使用 
 | POST | `/goals/:id/activate` | 重新激活取消或逾期目标 |
 | POST | `/goals/:id/cancel` | 带原因取消 |
 | POST | `/goals/:id/complete` | 用户确认完成 |
-| GET/POST | `/goals/:id/progress` | 进度列表/新增 |
+| GET/POST | `/goals/:id/progress` | 进度列表/新增（追加，不覆盖） |
 
 完成复盘请求会原子写入复盘、目标、进度并更新练习状态。任一步失败时全部回滚，返回 `REVIEW_INCOMPLETE` 且 `details` 为缺失项数组。
+
+### 目标指标方向与趋势
+
+- 创建/更新目标时可传 `metricDirection`：`UP`（越大越好，默认）或 `DOWN`（越小越好，如错音次数、失误次数）。未传时按指标类型兜底：`COUNT` 默认 `DOWN`，其余默认 `UP`。
+- 趋势按指标方向判定：相邻两次进度值沿目标方向改善记为 `IMPROVING`，背离记为 `REGRESSING`，相等记为 `FLAT`；首次进度记为 `FLAT`。
+- 记录进度达到目标值（`UP` 为 `actualValue >= targetValue`，`DOWN` 为 `actualValue <= targetValue`）时，目标在同一事务内自动转为 `ACHIEVED`；未达标则转为 `IN_PROGRESS`。
+
+### 证据与修订原因
+
+- 进度请求支持 `evidenceMediaId`（必须属于关联练习且状态为 `READY`）和 `revisionReason`。
+- 目标的 `evidenceRequirement` 为 `AUDIO` / `AUDIO_AND_SELF_REVIEW` 时必须提供证据音频；`SELF_REVIEW` / `AUDIO_AND_SELF_REVIEW` 时必须填写进度备注（自评）或修订原因，否则返回 `400 GOAL_EVIDENCE_REQUIRED`。
+- 进度按 `(goalId, sessionId)` 追加保存：同一练习重复记录不会覆盖历史，但必须填写 `revisionReason`，否则返回 `409 REVISION_REASON_REQUIRED`。
+- `POST /goals/:id/complete` 只接受 `OPEN`、`IN_PROGRESS` 状态（与 Worker 逾期扫描可移动的状态集合一致）；`MISSED` 目标需先重新激活。最近一次测量未达标仍要确认达成时，请求体需带 `revisionReason`。
+
+进度请求示例：
+
+```json
+{
+  "sessionId": "uuid",
+  "actualValue": 92,
+  "note": "连续三遍无停顿",
+  "evidenceMediaId": "uuid",
+  "revisionReason": "节拍器校准后重测，修正上次偏高的读数"
+}
+```
 
 ## 统计与导出
 

@@ -17,7 +17,7 @@ interface Annotation {
   title: string; description: string | null; nextAction: string | null; updatedAt: string;
 }
 interface Goal {
-  id: string; title: string; category: string; metricType: string; targetValue: number | string; baselineValue: number | string | null;
+  id: string; title: string; category: string; metricType: string; metricDirection: "UP" | "DOWN"; targetValue: number | string; baselineValue: number | string | null;
   unit: string; dueDate: string; method: string | null; evidenceRequirement: string; status: string;
 }
 interface Review {
@@ -31,7 +31,7 @@ interface UploadItem {
   id: string; file: File; status: string; progress: number; mediaId?: string; error?: string;
 }
 interface NewGoal {
-  key: string; title: string; category: string; metricType: string; baselineValue: string; targetValue: string; unit: string; dueDate: string;
+  key: string; title: string; category: string; metricType: string; metricDirection: "UP" | "DOWN"; baselineValue: string; targetValue: string; unit: string; dueDate: string;
   method: string; evidenceRequirement: string; annotationId: string;
 }
 
@@ -64,6 +64,8 @@ const annotationForm = reactive({
 const reviewForm = reactive({ goodPoints: "", mainIssues: "", nextFocus: "", noIssues: false, suggestedNextPracticeAt: "" });
 const progressValues = reactive<Record<string, string>>({});
 const progressNotes = reactive<Record<string, string>>({});
+const progressMedia = reactive<Record<string, string>>({});
+const progressRevision = reactive<Record<string, string>>({});
 const newGoals = ref<NewGoal[]>([]);
 
 const selectedMedia = computed(() => session.value?.mediaAssets.find((media) => media.id === selectedMediaId.value) ?? null);
@@ -315,7 +317,7 @@ function scheduleReviewSave(): void {
 
 function addGoal(): void {
   newGoals.value.push({
-    key: crypto.randomUUID(), title: "", category: "RHYTHM", metricType: "SPEED", baselineValue: "", targetValue: "", unit: "BPM",
+    key: crypto.randomUUID(), title: "", category: "RHYTHM", metricType: "SPEED", metricDirection: "UP", baselineValue: "", targetValue: "", unit: "BPM",
     dueDate: new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10), method: "", evidenceRequirement: "NONE", annotationId: "",
   });
 }
@@ -336,6 +338,8 @@ async function completeReview(): Promise<void> {
         goalId: goal.id,
         actualValue: Number(progressValues[goal.id]),
         note: progressNotes[goal.id] || null,
+        evidenceMediaId: progressMedia[goal.id] || null,
+        revisionReason: progressRevision[goal.id] || null,
       }));
     const result = await apiFetch<{ session: Session }>(`/api/v1/sessions/${session.value.id}/review/complete`, {
       method: "POST",
@@ -353,6 +357,7 @@ async function completeReview(): Promise<void> {
           title: goal.title,
           category: goal.category,
           metricType: goal.metricType,
+          metricDirection: goal.metricDirection,
           baselineValue: goal.baselineValue === "" ? null : Number(goal.baselineValue),
           targetValue: Number(goal.targetValue),
           unit: goal.unit,
@@ -490,9 +495,11 @@ onMounted(loadSession);
             <div v-if="openGoals.length" class="stack">
               <div v-for="goal in openGoals" :key="goal.id" class="goal-progress-row">
                 <strong>{{ goal.title }}</strong>
-                <small>目标 {{ goal.targetValue }} {{ goal.unit }} · 截止 {{ goal.dueDate.slice(0, 10) }}</small>
+                <small>目标 {{ goal.targetValue }} {{ goal.unit }}（{{ goal.metricDirection === "DOWN" ? "越小越好" : "越大越好" }}） · 截止 {{ goal.dueDate.slice(0, 10) }}</small>
                 <label class="field"><span>本次实际值</span><input v-model="progressValues[goal.id]" type="number" step="any" :placeholder="`目标 ${goal.targetValue}`" /></label>
-                <label class="field"><span>进度备注</span><textarea v-model="progressNotes[goal.id]" maxlength="1000" /></label>
+                <label v-if="goal.evidenceRequirement !== 'NONE'" class="field"><span>证据音频</span><select v-model="progressMedia[goal.id]"><option value="">选择本次练习音频</option><option v-for="media in readyMedia" :key="media.id" :value="media.id">{{ media.originalName }}</option></select></label>
+                <label class="field"><span>进度备注/自评</span><textarea v-model="progressNotes[goal.id]" maxlength="1000" /></label>
+                <label class="field"><span>修订原因</span><textarea v-model="progressRevision[goal.id]" maxlength="1000" placeholder="该目标在本次练习重复记录时必填" /></label>
               </div>
             </div>
             <p v-else class="muted">没有已存在的开放目标，请在下方创建新目标。</p>
@@ -506,6 +513,7 @@ onMounted(loadSession);
               <div class="form-grid">
                 <label class="field"><span>分类</span><select v-model="goal.category"><option value="RHYTHM">节奏</option><option value="FINGERING">指法</option><option value="EMOTION">情绪</option><option value="CONTINUITY">连贯性</option><option value="PITCH">音准</option><option value="SPEED">速度</option><option value="REPERTOIRE">曲目完成度</option><option value="OTHER">其他</option></select></label>
                 <label class="field"><span>指标</span><select v-model="goal.metricType"><option value="DURATION">时长</option><option value="COUNT">次数</option><option value="SPEED">速度</option><option value="ACCURACY">正确率</option><option value="SUBJECTIVE_SCORE">主观评分</option><option value="CUSTOM">自定义</option></select></label>
+                <label class="field"><span>指标方向</span><select v-model="goal.metricDirection"><option value="UP">越大越好</option><option value="DOWN">越小越好</option></select></label>
                 <label class="field"><span>基线</span><input v-model="goal.baselineValue" type="number" step="any" /></label>
                 <label class="field"><span>目标值</span><input v-model="goal.targetValue" required type="number" step="any" /></label>
                 <label class="field"><span>单位</span><input v-model="goal.unit" required maxlength="24" /></label>

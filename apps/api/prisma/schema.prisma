@@ -58,6 +58,11 @@ enum MetricType {
   CUSTOM
 }
 
+enum MetricDirection {
+  UP
+  DOWN
+}
+
 enum EvidenceRequirement {
   NONE
   AUDIO
@@ -219,6 +224,7 @@ model Goal {
   title              String              @db.VarChar(160)
   category           GoalCategory
   metricType         MetricType          @map("metric_type")
+  metricDirection    MetricDirection     @default(UP) @map("metric_direction")
   baselineValue      Decimal?            @map("baseline_value") @db.Decimal(14, 4)
   targetValue        Decimal             @map("target_value") @db.Decimal(14, 4)
   unit               String              @db.VarChar(24)
@@ -249,6 +255,7 @@ model GoalProgress {
   evidenceMediaId String?         @map("evidence_media_id") @db.Uuid
   actualValue     Decimal         @map("actual_value") @db.Decimal(14, 4)
   note            String?
+  revisionReason  String?         @map("revision_reason") @db.VarChar(1000)
   recordedAt      DateTime        @default(now()) @map("recorded_at") @db.Timestamptz(6)
   createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)

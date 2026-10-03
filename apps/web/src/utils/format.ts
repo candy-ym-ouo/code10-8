@@ -66,3 +66,14 @@ export const goalStatusLabels = {
   MISSED: "已逾期",
   CANCELLED: "已取消",
 } as const;
+
+export const metricDirectionLabels = {
+  UP: "越大越好",
+  DOWN: "越小越好",
+} as const;
+
+export const progressTrendLabels = {
+  IMPROVING: "趋势改善",
+  FLAT: "趋势持平",
+  REGRESSING: "趋势回落",
+} as const;

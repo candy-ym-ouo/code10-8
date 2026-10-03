@@ -4,16 +4,23 @@ import { apiFetch, ApiError } from "../api/client.js";
 import EmptyState from "../components/EmptyState.vue";
 import LoadingBlock from "../components/LoadingBlock.vue";
 import StatusBadge from "../components/StatusBadge.vue";
-import { goalStatusLabels } from "../utils/format.js";
+import { goalStatusLabels, metricDirectionLabels, progressTrendLabels } from "../utils/format.js";
 
 interface Goal {
-  id: string; title: string; category: string; metricType: string; baselineValue: number | null; targetValue: number; unit: string; dueDate: string;
+  id: string; title: string; category: string; metricType: string; metricDirection: "UP" | "DOWN"; baselineValue: number | null; targetValue: number; unit: string; dueDate: string;
   method: string | null; evidenceRequirement: string; status: string; version: number;
   sourceSession: { id: string; title: string; instrument: string; startedAt: string };
   annotation: { id: string; title: string; type: string } | null;
-  progresses: Array<{ id: string; actualValue: number; note: string | null; recordedAt: string; session: { id: string; title: string } }>;
+  progresses: Array<{
+    id: string; actualValue: number; note: string | null; revisionReason: string | null; recordedAt: string;
+    session: { id: string; title: string };
+    evidenceMedia: { id: string; originalName: string; status: string } | null;
+  }>;
 }
-interface SessionOption { id: string; title: string; instrument: string; status: string }
+interface SessionOption {
+  id: string; title: string; instrument: string; status: string;
+  mediaAssets: Array<{ id: string; originalName: string; status: string }>;
+}
 
 const goals = ref<Goal[]>([]);
 const sessions = ref<SessionOption[]>([]);
@@ -24,10 +31,33 @@ const creating = ref(false);
 const progressSession = reactive<Record<string, string>>({});
 const progressValue = reactive<Record<string, string>>({});
 const progressNote = reactive<Record<string, string>>({});
+const progressMedia = reactive<Record<string, string>>({});
+const progressRevision = reactive<Record<string, string>>({});
+const sessionMedia = reactive<Record<string, SessionOption["mediaAssets"]>>({});
 const form = reactive({
-  sourceSessionId: "", title: "", category: "RHYTHM", metricType: "SPEED", baselineValue: "", targetValue: "", unit: "BPM",
+  sourceSessionId: "", title: "", category: "RHYTHM", metricType: "SPEED", metricDirection: "UP", baselineValue: "", targetValue: "", unit: "BPM",
   dueDate: new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10), method: "", evidenceRequirement: "NONE", annotationId: "",
 });
+
+async function ensureMedia(sessionId: string): Promise<void> {
+  if (sessionMedia[sessionId]) return;
+  const result = await apiFetch<{ session: { mediaAssets: SessionOption["mediaAssets"] } }>(`/api/v1/sessions/${sessionId}`);
+  sessionMedia[sessionId] = result.session.mediaAssets;
+}
+
+function readyMediaFor(goal: Goal): SessionOption["mediaAssets"] {
+  const sessionId = progressSession[goal.id] || goal.sourceSession.id;
+  void ensureMedia(sessionId);
+  return (sessionMedia[sessionId] ?? []).filter((media) => media.status === "READY");
+}
+
+function trendFor(goal: Goal, index: number): "" | "IMPROVING" | "FLAT" | "REGRESSING" {
+  const older = goal.progresses[index + 1];
+  if (!older) return "";
+  const delta = Number(goal.progresses[index]!.actualValue) - Number(older.actualValue);
+  const directed = goal.metricDirection === "DOWN" ? -delta : delta;
+  return directed > 0 ? "IMPROVING" : directed < 0 ? "REGRESSING" : "FLAT";
+}
 
 async function load(): Promise<void> {
   loading.value = true;
@@ -57,6 +87,7 @@ async function createGoal(): Promise<void> {
       title: form.title,
       category: form.category,
       metricType: form.metricType,
+      metricDirection: form.metricDirection,
       baselineValue: form.baselineValue === "" ? null : Number(form.baselineValue),
       targetValue: Number(form.targetValue),
       unit: form.unit,
@@ -76,15 +107,37 @@ async function recordProgress(goal: Goal): Promise<void> {
   if (!Number.isFinite(actualValue)) return;
   await apiFetch(`/api/v1/goals/${goal.id}/progress`, {
     method: "POST",
-    body: JSON.stringify({ sessionId, actualValue, note: progressNote[goal.id] || null }),
+    body: JSON.stringify({
+      sessionId,
+      actualValue,
+      note: progressNote[goal.id] || null,
+      evidenceMediaId: progressMedia[goal.id] || null,
+      revisionReason: progressRevision[goal.id] || null,
+    }),
   });
   progressValue[goal.id] = "";
   progressNote[goal.id] = "";
+  progressMedia[goal.id] = "";
+  progressRevision[goal.id] = "";
   await load();
 }
 async function completeGoal(goal: Goal): Promise<void> {
   if (!window.confirm(`确认目标“${goal.title}”已经达成？`)) return;
-  await apiFetch(`/api/v1/goals/${goal.id}/complete`, { method: "POST", body: "{}" });
+  let revisionReason: string | null = null;
+  const latest = goal.progresses[0];
+  const reached = latest
+    ? goal.metricDirection === "DOWN"
+      ? Number(latest.actualValue) <= Number(goal.targetValue)
+      : Number(latest.actualValue) >= Number(goal.targetValue)
+    : false;
+  if (!reached) {
+    revisionReason = window.prompt("最近一次测量尚未达到目标值，请填写修订或豁免原因：");
+    if (!revisionReason) return;
+  }
+  await apiFetch(`/api/v1/goals/${goal.id}/complete`, {
+    method: "POST",
+    body: JSON.stringify({ revisionReason }),
+  });
   await load();
 }
 async function cancelGoal(goal: Goal): Promise<void> {
@@ -117,6 +170,7 @@ onMounted(load);
       <label class="field full"><span>可执行目标标题</span><input v-model="form.title" required maxlength="160" placeholder="包含具体片段、动作和数值" /></label>
       <label class="field"><span>分类</span><select v-model="form.category"><option value="RHYTHM">节奏</option><option value="FINGERING">指法</option><option value="EMOTION">情绪</option><option value="CONTINUITY">连贯性</option><option value="PITCH">音准</option><option value="SPEED">速度</option><option value="REPERTOIRE">曲目完成度</option><option value="OTHER">其他</option></select></label>
       <label class="field"><span>指标类型</span><select v-model="form.metricType"><option value="DURATION">时长</option><option value="COUNT">次数</option><option value="SPEED">速度</option><option value="ACCURACY">正确率</option><option value="SUBJECTIVE_SCORE">主观评分</option><option value="CUSTOM">自定义</option></select></label>
+      <label class="field"><span>指标方向</span><select v-model="form.metricDirection"><option value="UP">{{ metricDirectionLabels.UP }}</option><option value="DOWN">{{ metricDirectionLabels.DOWN }}</option></select></label>
       <label class="field"><span>基线值</span><input v-model="form.baselineValue" type="number" step="any" /></label>
       <label class="field"><span>目标值</span><input v-model="form.targetValue" required type="number" step="any" /></label>
       <label class="field"><span>单位</span><input v-model="form.unit" required maxlength="24" /></label>
@@ -133,17 +187,31 @@ onMounted(load);
       <article v-for="goal in goals" :key="goal.id" class="card stack">
         <div class="row between"><StatusBadge :value="goal.status" kind="goal" /><small>截止 {{ goal.dueDate.slice(0, 10) }}</small></div>
         <div><h2>{{ goal.title }}</h2><p class="muted">{{ goal.sourceSession.instrument }} · 来源：{{ goal.sourceSession.title }}</p></div>
-        <div class="metric-line"><strong>{{ goal.targetValue }} {{ goal.unit }}</strong><span v-if="goal.baselineValue != null">基线 {{ goal.baselineValue }} {{ goal.unit }}</span></div>
+        <div class="metric-line"><strong>{{ goal.targetValue }} {{ goal.unit }}</strong><span v-if="goal.baselineValue != null">基线 {{ goal.baselineValue }} {{ goal.unit }}</span><small>{{ metricDirectionLabels[goal.metricDirection] }}</small></div>
         <p v-if="goal.method" class="muted">{{ goal.method }}</p>
         <div v-if="goal.progresses.length" class="progress-history">
           <strong>最近进度</strong>
-          <div v-for="progress in goal.progresses.slice(0, 3)" :key="progress.id"><span>{{ progress.actualValue }} {{ goal.unit }}</span><small>{{ progress.recordedAt.slice(0, 10) }} · {{ progress.session.title }}</small></div>
+          <div v-for="(progress, index) in goal.progresses.slice(0, 5)" :key="progress.id">
+            <span>
+              {{ progress.actualValue }} {{ goal.unit }}
+              <small v-if="trendFor(goal, index)" class="trend" :class="trendFor(goal, index)">{{ progressTrendLabels[trendFor(goal, index) as "IMPROVING"] }}</small>
+            </span>
+            <small>{{ progress.recordedAt.slice(0, 10) }} · {{ progress.session.title }}</small>
+          </div>
+          <small v-if="goal.progresses[0]?.evidenceMedia" class="muted">证据音频：{{ goal.progresses[0].evidenceMedia.originalName }}</small>
+          <small v-for="progress in goal.progresses.filter((item) => item.revisionReason).slice(0, 2)" :key="`${progress.id}-rev`" class="muted">修订原因：{{ progress.revisionReason }}</small>
         </div>
         <div v-if="!['ACHIEVED', 'CANCELLED'].includes(goal.status)" class="progress-form">
           <select v-model="progressSession[goal.id]"><option value="">选择本次练习</option><option v-for="session in sessions" :key="session.id" :value="session.id">{{ session.title }}</option></select>
           <input v-model="progressValue[goal.id]" type="number" step="any" placeholder="实际值" />
-          <input v-model="progressNote[goal.id]" placeholder="备注" />
+          <select v-if="goal.evidenceRequirement !== 'NONE'" v-model="progressMedia[goal.id]">
+            <option value="">选择证据音频</option>
+            <option v-for="media in readyMediaFor(goal)" :key="media.id" :value="media.id">{{ media.originalName }}</option>
+          </select>
+          <input v-model="progressNote[goal.id]" placeholder="备注/自评" />
+          <input v-model="progressRevision[goal.id]" placeholder="修订原因（重复记录时必填）" />
           <button class="button small secondary" @click="recordProgress(goal)">记录进度</button>
+          <small v-if="goal.evidenceRequirement !== 'NONE'" class="muted hint">证据要求：{{ goal.evidenceRequirement === 'AUDIO' ? '音频' : goal.evidenceRequirement === 'SELF_REVIEW' ? '自评' : '音频与自评' }}</small>
         </div>
         <div class="row end">
           <button v-if="['MISSED', 'CANCELLED'].includes(goal.status)" class="button small secondary" @click="activateGoal(goal)">重新激活</button>
@@ -162,6 +230,11 @@ onMounted(load);
 .metric-line span { color: var(--muted); }
 .progress-history { display: grid; gap: 7px; padding: 12px; border-radius: 10px; background: var(--surface-soft); }
 .progress-history div { display: flex; justify-content: space-between; gap: 10px; }
-.progress-form { display: grid; grid-template-columns: 1fr 100px 1fr auto; gap: 8px; }
+.trend { margin-left: 6px; padding: 1px 6px; border-radius: 6px; }
+.trend.IMPROVING { color: #176c4b; background: #dff3e7; }
+.trend.REGRESSING { color: #9a2b25; background: #f8e1de; }
+.trend.FLAT { color: #66706c; background: #ecefec; }
+.hint { grid-column: 1 / -1; }
+.progress-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; align-items: center; }
 @media (max-width: 900px) { .goals-grid { grid-template-columns: 1fr; } .progress-form { grid-template-columns: 1fr; } }
 </style>
