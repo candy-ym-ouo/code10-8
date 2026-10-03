@@ -5,14 +5,21 @@ import { apiFetch, ApiError } from "../api/client.js";
 import LoadingBlock from "../components/LoadingBlock.vue";
 import StatusBadge from "../components/StatusBadge.vue";
 import WaveformPlayer, { type WaveAnnotation } from "../components/WaveformPlayer.vue";
-import { annotationLabels, formatBytes, formatDateTime, formatDuration, formatTimeMs, goalStatusLabels } from "../utils/format.js";
+import { annotationLabels, formatBytes, formatDateTime, formatDuration, formatTimeMs, goalStatusLabels, metricDirectionLabels, progressTrendClass, progressTrendLabels } from "../utils/format.js";
 
 interface Media {
   id: string; status: string; originalName: string; mimeType: string; sizeBytes: number; durationMs: number | null; codec: string | null;
   sampleRate: number | null; channels: number | null; peaks: number[] | null; failureMessage: string | null;
 }
 interface Annotation { id: string; mediaId: string; type: "RHYTHM" | "FINGERING" | "EMOTION"; title: string; severity: number; startMs: number; endMs: number; description: string | null; nextAction: string | null }
-interface Goal { id: string; title: string; category: string; targetValue: number; baselineValue: number | null; unit: string; dueDate: string; status: string; progresses: Array<{ id: string; actualValue: number; note: string | null; recordedAt: string }> }
+interface Goal {
+  id: string; title: string; category: string; metricDirection: "HIGHER_BETTER" | "LOWER_BETTER";
+  targetValue: number; baselineValue: number | null; unit: string; dueDate: string; status: string; revisionReason: string | null;
+  progresses: Array<{
+    id: string; actualValue: number; trend: "UP" | "DOWN" | "FLAT" | null; note: string | null; recordedAt: string;
+    evidenceMedia: { id: string; originalName: string } | null;
+  }>;
+}
 interface Session {
   id: string; title: string; instrument: string; focus: string | null; location: string | null; notes: string | null; status: string; startedAt: string;
   completedAt: string | null; actualDurationMs: number; mediaAssets: Media[]; annotations: Annotation[]; goals: Goal[];
@@ -160,10 +167,12 @@ onMounted(load);
             <div v-if="session.goals.length" class="stack">
               <div v-for="goal in session.goals" :key="goal.id" class="goal-detail">
                 <div class="row between"><strong>{{ goal.title }}</strong><StatusBadge :value="goal.status" kind="goal" /></div>
-                <small>目标 {{ goal.targetValue }} {{ goal.unit }} · 截止 {{ goal.dueDate.slice(0, 10) }}</small>
+                <small>目标 {{ goal.targetValue }} {{ goal.unit }}（{{ metricDirectionLabels[goal.metricDirection] }}） · 截止 {{ goal.dueDate.slice(0, 10) }}</small>
+                <small v-if="goal.revisionReason" class="revision-reason">修订原因：{{ goal.revisionReason }}</small>
                 <div v-if="goal.progresses.length">
                   <div v-for="progress in goal.progresses" :key="progress.id" class="progress-record">
-                    <span>{{ progress.actualValue }} {{ goal.unit }}</span><small>{{ formatDateTime(progress.recordedAt) }} · {{ progress.note || "无备注" }}</small>
+                    <span>{{ progress.actualValue }} {{ goal.unit }}<em v-if="progress.trend" class="trend" :class="progressTrendClass(progress.trend)">{{ progressTrendLabels[progress.trend] }}</em></span>
+                    <small>{{ formatDateTime(progress.recordedAt) }} · {{ progress.note || "无备注" }}<template v-if="progress.evidenceMedia"> · 🎧 证据：{{ progress.evidenceMedia.originalName }}</template></small>
                   </div>
                 </div>
                 <small v-else>尚无进度记录</small>
@@ -209,6 +218,11 @@ onMounted(load);
 .annotation-detail { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .goal-detail { display: grid; gap: 7px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .progress-record { display: grid; padding: 8px 0 0; border-top: 1px solid var(--line); margin-top: 8px; }
+.progress-record .trend { font-style: normal; font-size: 0.85em; margin-left: 6px; }
+.trend-up { color: var(--primary); }
+.trend-down { color: var(--danger); }
+.trend-flat { color: var(--muted); }
+.revision-reason { color: var(--warning); }
 .details { display: grid; grid-template-columns: 80px 1fr; gap: 9px 12px; margin: 0; }
 .details dt { color: var(--muted); }
 .details dd { margin: 0; overflow-wrap: anywhere; }

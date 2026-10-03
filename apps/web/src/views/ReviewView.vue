@@ -17,8 +17,10 @@ interface Annotation {
   title: string; description: string | null; nextAction: string | null; updatedAt: string;
 }
 interface Goal {
-  id: string; title: string; category: string; metricType: string; targetValue: number | string; baselineValue: number | string | null;
+  id: string; title: string; category: string; metricType: string; metricDirection: "HIGHER_BETTER" | "LOWER_BETTER";
+  targetValue: number | string; baselineValue: number | string | null;
   unit: string; dueDate: string; method: string | null; evidenceRequirement: string; status: string;
+  progresses: Array<{ id: string; actualValue: number | string; trend: "UP" | "DOWN" | "FLAT" | null }>;
 }
 interface Review {
   goodPoints: string | null; mainIssues: string | null; nextFocus: string | null; noIssues: boolean; suggestedNextPracticeAt: string | null;
@@ -31,7 +33,8 @@ interface UploadItem {
   id: string; file: File; status: string; progress: number; mediaId?: string; error?: string;
 }
 interface NewGoal {
-  key: string; title: string; category: string; metricType: string; baselineValue: string; targetValue: string; unit: string; dueDate: string;
+  key: string; title: string; category: string; metricType: string; metricDirection: "HIGHER_BETTER" | "LOWER_BETTER";
+  baselineValue: string; targetValue: string; unit: string; dueDate: string;
   method: string; evidenceRequirement: string; annotationId: string;
 }
 
@@ -64,6 +67,7 @@ const annotationForm = reactive({
 const reviewForm = reactive({ goodPoints: "", mainIssues: "", nextFocus: "", noIssues: false, suggestedNextPracticeAt: "" });
 const progressValues = reactive<Record<string, string>>({});
 const progressNotes = reactive<Record<string, string>>({});
+const progressEvidence = reactive<Record<string, string>>({});
 const newGoals = ref<NewGoal[]>([]);
 
 const selectedMedia = computed(() => session.value?.mediaAssets.find((media) => media.id === selectedMediaId.value) ?? null);
@@ -82,6 +86,25 @@ const waveAnnotations = computed<WaveAnnotation[]>(() =>
 );
 const openGoals = computed(() => session.value?.goals.filter((goal) => ["OPEN", "IN_PROGRESS"].includes(goal.status)) ?? []);
 const readyMedia = computed(() => session.value?.mediaAssets.filter((media) => media.status === "READY") ?? []);
+
+/** 按目标的指标方向实时预览本次输入相对上一条进度的趋势，保存后以服务端判定为准。 */
+function previewTrend(goal: Goal): { label: string; cls: string } | null {
+  const raw = progressValues[goal.id];
+  if (raw === undefined || raw === "") return null;
+  const current = Number(raw);
+  if (!Number.isFinite(current)) return null;
+  const previousValue = goal.progresses?.length ? Number(goal.progresses[0]?.actualValue) : null;
+  if (previousValue == null || !Number.isFinite(previousValue)) return null;
+  if (current === previousValue) return { label: "持平 →", cls: "trend-flat" };
+  const improving = goal.metricDirection === "HIGHER_BETTER" ? current > previousValue : current < previousValue;
+  return improving ? { label: "向好 ↑", cls: "trend-up" } : { label: "退步 ↓", cls: "trend-down" };
+}
+function evidenceRequired(goal: Goal): "audio" | "self" | "both" | null {
+  if (goal.evidenceRequirement === "AUDIO") return "audio";
+  if (goal.evidenceRequirement === "SELF_REVIEW") return "self";
+  if (goal.evidenceRequirement === "AUDIO_AND_SELF_REVIEW") return "both";
+  return null;
+}
 const activeUploads = computed(() => uploads.value.filter((item) => !["READY", "FAILED", "CANCELLED"].includes(item.status)));
 const startMs = computed(() => parseTimeInput(annotationForm.startText) ?? 0);
 const endMs = computed(() => parseTimeInput(annotationForm.endText) ?? 0);
@@ -315,7 +338,8 @@ function scheduleReviewSave(): void {
 
 function addGoal(): void {
   newGoals.value.push({
-    key: crypto.randomUUID(), title: "", category: "RHYTHM", metricType: "SPEED", baselineValue: "", targetValue: "", unit: "BPM",
+    key: crypto.randomUUID(), title: "", category: "RHYTHM", metricType: "SPEED", metricDirection: "HIGHER_BETTER",
+    baselineValue: "", targetValue: "", unit: "BPM",
     dueDate: new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10), method: "", evidenceRequirement: "NONE", annotationId: "",
   });
 }
@@ -336,7 +360,25 @@ async function completeReview(): Promise<void> {
         goalId: goal.id,
         actualValue: Number(progressValues[goal.id]),
         note: progressNotes[goal.id] || null,
+        evidenceMediaId: progressEvidence[goal.id] || null,
       }));
+    const evidenceError = openGoals.value
+      .filter((goal) => progressValues[goal.id] !== undefined && progressValues[goal.id] !== "")
+      .map((goal) => {
+        const required = evidenceRequired(goal);
+        if ((required === "audio" || required === "both") && !progressEvidence[goal.id]) {
+          return `目标“${goal.title}”要求音频证据，请选择证据音频`;
+        }
+        if ((required === "self" || required === "both") && !progressNotes[goal.id]?.trim()) {
+          return `目标“${goal.title}”要求自评说明，请填写进度备注`;
+        }
+        return null;
+      })
+      .find((message): message is string => Boolean(message));
+    if (evidenceError) {
+      error.value = evidenceError;
+      return;
+    }
     const result = await apiFetch<{ session: Session }>(`/api/v1/sessions/${session.value.id}/review/complete`, {
       method: "POST",
       body: JSON.stringify({
@@ -353,6 +395,7 @@ async function completeReview(): Promise<void> {
           title: goal.title,
           category: goal.category,
           metricType: goal.metricType,
+          metricDirection: goal.metricDirection,
           baselineValue: goal.baselineValue === "" ? null : Number(goal.baselineValue),
           targetValue: Number(goal.targetValue),
           unit: goal.unit,
@@ -490,9 +533,10 @@ onMounted(loadSession);
             <div v-if="openGoals.length" class="stack">
               <div v-for="goal in openGoals" :key="goal.id" class="goal-progress-row">
                 <strong>{{ goal.title }}</strong>
-                <small>目标 {{ goal.targetValue }} {{ goal.unit }} · 截止 {{ goal.dueDate.slice(0, 10) }}</small>
-                <label class="field"><span>本次实际值</span><input v-model="progressValues[goal.id]" type="number" step="any" :placeholder="`目标 ${goal.targetValue}`" /></label>
-                <label class="field"><span>进度备注</span><textarea v-model="progressNotes[goal.id]" maxlength="1000" /></label>
+                <small>目标 {{ goal.targetValue }} {{ goal.unit }}（{{ goal.metricDirection === "HIGHER_BETTER" ? "越高越好" : "越低越好" }}） · 截止 {{ goal.dueDate.slice(0, 10) }}</small>
+                <label class="field"><span>本次实际值</span><input v-model="progressValues[goal.id]" type="number" step="any" :placeholder="`目标 ${goal.targetValue}`" /><em v-if="previewTrend(goal)" class="trend" :class="previewTrend(goal)!.cls">{{ previewTrend(goal)!.label }}</em></label>
+                <label v-if="goal.evidenceRequirement !== 'NONE'" class="field"><span>证据音频{{ goal.evidenceRequirement === 'AUDIO' || goal.evidenceRequirement === 'AUDIO_AND_SELF_REVIEW' ? '（必填）' : '' }}</span><select v-model="progressEvidence[goal.id]"><option value="">不选择</option><option v-for="media in readyMedia" :key="media.id" :value="media.id">{{ media.originalName }}</option></select></label>
+                <label class="field"><span>进度备注{{ goal.evidenceRequirement === 'SELF_REVIEW' || goal.evidenceRequirement === 'AUDIO_AND_SELF_REVIEW' ? '（自评必填）' : '' }}</span><textarea v-model="progressNotes[goal.id]" maxlength="1000" /></label>
               </div>
             </div>
             <p v-else class="muted">没有已存在的开放目标，请在下方创建新目标。</p>
@@ -506,6 +550,7 @@ onMounted(loadSession);
               <div class="form-grid">
                 <label class="field"><span>分类</span><select v-model="goal.category"><option value="RHYTHM">节奏</option><option value="FINGERING">指法</option><option value="EMOTION">情绪</option><option value="CONTINUITY">连贯性</option><option value="PITCH">音准</option><option value="SPEED">速度</option><option value="REPERTOIRE">曲目完成度</option><option value="OTHER">其他</option></select></label>
                 <label class="field"><span>指标</span><select v-model="goal.metricType"><option value="DURATION">时长</option><option value="COUNT">次数</option><option value="SPEED">速度</option><option value="ACCURACY">正确率</option><option value="SUBJECTIVE_SCORE">主观评分</option><option value="CUSTOM">自定义</option></select></label>
+                <label class="field"><span>方向</span><select v-model="goal.metricDirection"><option value="HIGHER_BETTER">越高越好</option><option value="LOWER_BETTER">越低越好</option></select></label>
                 <label class="field"><span>基线</span><input v-model="goal.baselineValue" type="number" step="any" /></label>
                 <label class="field"><span>目标值</span><input v-model="goal.targetValue" required type="number" step="any" /></label>
                 <label class="field"><span>单位</span><input v-model="goal.unit" required maxlength="24" /></label>
@@ -546,6 +591,10 @@ onMounted(loadSession);
 .boundary { height: 42px; align-self: end; }
 .goal-progress-row, .new-goal { display: grid; gap: 12px; padding: 13px 0; border-bottom: 1px solid var(--line); }
 .goal-progress-row:last-child, .new-goal:last-child { border-bottom: 0; }
+.trend { font-style: normal; font-size: 0.9em; margin-left: 8px; }
+.trend-up { color: var(--primary); }
+.trend-down { color: var(--danger); }
+.trend-flat { color: var(--muted); }
 .danger-text { color: var(--danger); }
 @media (max-width: 1180px) {
   .review-grid { grid-template-columns: 220px 1fr; }

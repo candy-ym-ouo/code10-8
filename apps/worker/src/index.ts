@@ -5,6 +5,7 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Worker } from "bullmq";
 import { Redis } from "ioredis";
+import { ACTIVE_GOAL_STATUSES } from "@practice/contracts";
 import { getConfig } from "./config/env.js";
 import { prisma } from "./lib/prisma.js";
 import { deleteObject, getObjectStream, putObject } from "./lib/s3.js";
@@ -113,12 +114,13 @@ async function exportData(exportId: string) {
 }
 
 async function scanOverdueGoals() {
+  // 口径与 contracts.isGoalOverdue 完全一致：截止日期早于今日零点（UTC）的活动目标标记逾期。
   const startOfToday = new Date();
   startOfToday.setUTCHours(0, 0, 0, 0);
   const result = await prisma.goal.updateMany({
     where: {
       dueDate: { lt: startOfToday },
-      status: { in: ["OPEN", "IN_PROGRESS"] },
+      status: { in: [...ACTIVE_GOAL_STATUSES] },
     },
     data: { status: "MISSED" },
   });

@@ -66,3 +66,21 @@ export const goalStatusLabels = {
   MISSED: "已逾期",
   CANCELLED: "已取消",
 } as const;
+
+export const metricDirectionLabels = {
+  HIGHER_BETTER: "越高越好",
+  LOWER_BETTER: "越低越好",
+} as const;
+
+export const progressTrendLabels = {
+  UP: "向好 ↑",
+  DOWN: "退步 ↓",
+  FLAT: "持平 →",
+} as const;
+
+export function progressTrendClass(trend: string | null | undefined): string {
+  if (trend === "UP") return "trend-up";
+  if (trend === "DOWN") return "trend-down";
+  if (trend === "FLAT") return "trend-flat";
+  return "trend-none";
+}

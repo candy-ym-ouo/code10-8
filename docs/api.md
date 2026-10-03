@@ -107,10 +107,20 @@ Refresh Cookie 路径为 `/api/v1/auth`，生产环境在 HTTPS 下自动使用 
 | POST | `/sessions/:sessionId/review/complete` | 完成复盘事务 |
 | GET/POST | `/goals` | 目标列表/创建 |
 | GET/PATCH | `/goals/:id` | 目标详情/更新 |
-| POST | `/goals/:id/activate` | 重新激活取消或逾期目标 |
+| POST | `/goals/:id/activate` | 重新激活取消或逾期目标（需修订原因） |
 | POST | `/goals/:id/cancel` | 带原因取消 |
 | POST | `/goals/:id/complete` | 用户确认完成 |
 | GET/POST | `/goals/:id/progress` | 进度列表/新增 |
+
+目标与进度规则：
+
+- 目标携带 `metricDirection`：`HIGHER_BETTER`（速度、正确率等）或 `LOWER_BETTER`（错误数、耗时等）。趋势与达成判定都按该方向解释。
+- 进度是只追加记录：重复提交始终插入新行并保留各自的证据音频与备注，不更新、不覆盖历史。
+- 每条进度返回 `trend`：相对同一目标上一条进度（按 `recordedAt`、`createdAt` 排序）判定为 `UP`/`DOWN`/`FLAT`，首条为 `null`。
+- 进度按方向达到 `targetValue` 时目标自动置为 `ACHIEVED`；手动 `complete` 也必须存在达标的进度记录，且已到期目标必须先重新激活。
+- 修改指标类型/方向、基线、目标值或截止日期属于修订，必须提供 `revisionReason`；重新激活同样记录修订原因。
+- `evidenceRequirement` 为 `AUDIO`/`AUDIO_AND_SELF_REVIEW` 时进度必须携带已就绪的本练习证据音频，`SELF_REVIEW` 时必须填写自评备注。
+- 逾期口径只有一处：截止日期早于 UTC 当日零点的 `OPEN`/`IN_PROGRESS` 目标为逾期，Worker 扫描、进度记录与确认达成共用同一判定。
 
 完成复盘请求会原子写入复盘、目标、进度并更新练习状态。任一步失败时全部回滚，返回 `REVIEW_INCOMPLETE` 且 `details` 为缺失项数组。
 

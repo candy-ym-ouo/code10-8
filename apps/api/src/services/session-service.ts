@@ -2,6 +2,7 @@ import { Prisma, SessionStatus } from "@prisma/client";
 import {
   calculateSessionDuration,
   describeMissingReview,
+  isGoalOverdue,
   type SessionStatus as ContractSessionStatus,
 } from "@practice/contracts";
 import type { z } from "zod";
@@ -9,6 +10,7 @@ import type { completionSchema, sessionListQuerySchema } from "@practice/contrac
 import { AppError, notFound } from "../lib/errors.js";
 import { prisma } from "../lib/prisma.js";
 import { enqueueCleanup } from "../lib/queue.js";
+import { recordGoalProgress, assertProgressEvidence } from "../lib/goal-service.js";
 
 export const sessionInclude = {
   mediaAssets: {
@@ -232,7 +234,7 @@ export async function completeSession(
       annotations: { select: { id: true } },
       goals: {
         where: { status: { in: ["OPEN", "IN_PROGRESS"] } },
-        select: { id: true },
+        select: { id: true, status: true, targetValue: true, metricDirection: true, dueDate: true, evidenceRequirement: true },
       },
       goalProgresses: { where: { sessionId }, select: { id: true } },
       review: true,
@@ -253,6 +255,7 @@ export async function completeSession(
   });
   if (missing.length > 0) throw new AppError(400, "REVIEW_INCOMPLETE", "复盘闭环尚未完成", missing);
 
+  const now = new Date();
   const annotationIds = new Set(session.annotations.map((item) => item.id));
   const readyMediaIds = new Set(session.mediaAssets.map((item) => item.id));
   const openGoalIds = new Set(session.goals.map((item) => item.id));
@@ -262,20 +265,24 @@ export async function completeSession(
     }
   }
   for (const progress of input.goalProgressUpdates) {
-    if (!openGoalIds.has(progress.goalId)) {
+    const goal = session.goals.find((item) => item.id === progress.goalId);
+    if (!goal || !openGoalIds.has(progress.goalId)) {
       throw new AppError(400, "VALIDATION_ERROR", "进度记录关联的开放目标不存在");
+    }
+    // 与逾期扫描同一口径：复盘完成瞬间已逾期的目标不能借进度直接关闭，必须先修订重新激活。
+    if (isGoalOverdue({ status: goal.status, dueDate: goal.dueDate, now })) {
+      throw new AppError(409, "GOAL_OVERDUE", `目标“${progress.goalId}”已逾期，请先重新激活并填写修订原因`);
     }
     if (progress.evidenceMediaId && !readyMediaIds.has(progress.evidenceMediaId)) {
       throw new AppError(400, "VALIDATION_ERROR", "证据音频必须来自当前练习且已就绪");
     }
+    assertProgressEvidence(goal, progress);
   }
 
   const duration =
     session.actualDurationMs > 0n
       ? session.actualDurationMs
       : BigInt(calculateSessionDuration(session.mediaAssets.map((item) => item.durationMs ? Number(item.durationMs) : null)));
-  const now = new Date();
-
   await prisma.$transaction(async (tx) => {
     const updated = await tx.practiceSession.updateMany({
       where: { id: sessionId, userId, version: input.version, status: { in: ["DRAFT", "IN_REVIEW"] } },
@@ -320,6 +327,7 @@ export async function completeSession(
           title: goal.title,
           category: goal.category,
           metricType: goal.metricType,
+          metricDirection: goal.metricDirection,
           baselineValue: goal.baselineValue ?? null,
           targetValue: goal.targetValue,
           unit: goal.unit,
@@ -331,20 +339,16 @@ export async function completeSession(
     }
 
     for (const progress of input.goalProgressUpdates) {
-      await tx.goalProgress.create({
-        data: {
-          userId,
-          goalId: progress.goalId,
-          sessionId,
-          actualValue: progress.actualValue,
-          note: progress.note ?? null,
-          evidenceMediaId: progress.evidenceMediaId ?? null,
-          recordedAt: progress.recordedAt ?? now,
-        },
-      });
-      await tx.goal.update({
-        where: { id: progress.goalId },
-        data: { status: "IN_PROGRESS", version: { increment: 1 } },
+      const goal = session.goals.find((item) => item.id === progress.goalId);
+      if (!goal) throw new AppError(400, "VALIDATION_ERROR", "进度记录关联的开放目标不存在");
+      await recordGoalProgress(tx, {
+        userId,
+        goal,
+        sessionId,
+        actualValue: progress.actualValue,
+        note: progress.note,
+        evidenceMediaId: progress.evidenceMediaId,
+        recordedAt: progress.recordedAt ?? now,
       });
     }
   });

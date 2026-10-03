@@ -58,6 +58,17 @@ enum MetricType {
   CUSTOM
 }
 
+enum MetricDirection {
+  HIGHER_BETTER
+  LOWER_BETTER
+}
+
+enum ProgressTrend {
+  UP
+  DOWN
+  FLAT
+}
+
 enum EvidenceRequirement {
   NONE
   AUDIO
@@ -219,6 +230,7 @@ model Goal {
   title              String              @db.VarChar(160)
   category           GoalCategory
   metricType         MetricType          @map("metric_type")
+  metricDirection    MetricDirection     @default(HIGHER_BETTER) @map("metric_direction")
   baselineValue      Decimal?            @map("baseline_value") @db.Decimal(14, 4)
   targetValue        Decimal             @map("target_value") @db.Decimal(14, 4)
   unit               String              @db.VarChar(24)
@@ -228,6 +240,7 @@ model Goal {
   status             GoalStatus          @default(OPEN)
   completedAt        DateTime?           @map("completed_at") @db.Timestamptz(6)
   cancelledReason    String?             @map("cancelled_reason")
+  revisionReason     String?             @map("revision_reason")
   version            Int                 @default(0)
   createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -248,6 +261,7 @@ model GoalProgress {
   sessionId       String          @map("session_id") @db.Uuid
   evidenceMediaId String?         @map("evidence_media_id") @db.Uuid
   actualValue     Decimal         @map("actual_value") @db.Decimal(14, 4)
+  trend           ProgressTrend?  @map("trend")
   note            String?
   recordedAt      DateTime        @default(now()) @map("recorded_at") @db.Timestamptz(6)
   createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)

@@ -36,8 +36,11 @@ export const METRIC_TYPES = [
   "SUBJECTIVE_SCORE",
   "CUSTOM",
 ] as const;
+export const METRIC_DIRECTIONS = ["HIGHER_BETTER", "LOWER_BETTER"] as const;
+export const PROGRESS_TRENDS = ["UP", "DOWN", "FLAT"] as const;
 export const EVIDENCE_REQUIREMENTS = ["NONE", "AUDIO", "SELF_REVIEW", "AUDIO_AND_SELF_REVIEW"] as const;
 export const GOAL_STATUSES = ["OPEN", "IN_PROGRESS", "ACHIEVED", "MISSED", "CANCELLED"] as const;
+export const ACTIVE_GOAL_STATUSES = ["OPEN", "IN_PROGRESS"] as const;
 
 const requiredText = (label: string, max: number) =>
   z.string().trim().min(1, `${label}不能为空`).max(max, `${label}不能超过 ${max} 个字符`);
@@ -144,6 +147,7 @@ export const goalCreateSchema = z.object({
   title: requiredText("目标标题", 160),
   category: z.enum(GOAL_CATEGORIES),
   metricType: z.enum(METRIC_TYPES),
+  metricDirection: z.enum(METRIC_DIRECTIONS).default("HIGHER_BETTER"),
   baselineValue: z.coerce.number().finite().optional().nullable(),
   targetValue: z.coerce.number().finite(),
   unit: requiredText("单位", 24),
@@ -154,7 +158,24 @@ export const goalCreateSchema = z.object({
 export const goalUpdateSchema = goalCreateSchema
   .omit({ sourceSessionId: true })
   .partial()
-  .extend({ version: z.coerce.number().int().nonnegative() });
+  .extend({
+    version: z.coerce.number().int().nonnegative(),
+    revisionReason: optionalText(1000, "修订原因"),
+  });
+
+/** 修改这些字段属于“调整目标口径”，必须填写修订原因。 */
+export const GOAL_REVISION_FIELDS = [
+  "metricType",
+  "metricDirection",
+  "baselineValue",
+  "targetValue",
+  "dueDate",
+] as const;
+export type GoalRevisionField = (typeof GOAL_REVISION_FIELDS)[number];
+
+export function hasGoalRevision(input: Partial<Record<GoalRevisionField, unknown>>): boolean {
+  return GOAL_REVISION_FIELDS.some((field) => input[field] !== undefined);
+}
 export const goalListQuerySchema = z.object({
   status: z.enum(GOAL_STATUSES).optional(),
   category: z.enum(GOAL_CATEGORIES).optional(),
@@ -174,6 +195,7 @@ export const goalCancelSchema = z.object({ reason: requiredText("取消原因", 
 export const goalActivateSchema = z.object({
   dueDate: z.coerce.date().optional(),
   targetValue: z.coerce.number().finite().optional(),
+  revisionReason: optionalText(1000, "修订原因"),
 });
 
 export const completionGoalProgressSchema = goalProgressCreateSchema.omit({ sessionId: true }).extend({
@@ -208,6 +230,8 @@ export type MediaStatus = (typeof MEDIA_STATUSES)[number];
 export type AnnotationType = (typeof ANNOTATION_TYPES)[number];
 export type GoalCategory = (typeof GOAL_CATEGORIES)[number];
 export type MetricType = (typeof METRIC_TYPES)[number];
+export type MetricDirection = (typeof METRIC_DIRECTIONS)[number];
+export type ProgressTrend = (typeof PROGRESS_TRENDS)[number];
 export type GoalStatus = (typeof GOAL_STATUSES)[number];
 export type EvidenceRequirement = (typeof EVIDENCE_REQUIREMENTS)[number];
 
@@ -253,8 +277,52 @@ export function validateAnnotationRange(
   return { ok: true };
 }
 
-export function isGoalProgressValid(actualValue: number, targetValue: number): boolean {
-  return Number.isFinite(actualValue) && Number.isFinite(targetValue) && actualValue >= targetValue;
+/**
+ * 指标方向：数值越高越好（速度、正确率等）或越低越好（错误数、耗时等）。
+ * 进度趋势与达成判定都必须按该方向解释，不能一律比较数值大小。
+ */
+export function isGoalProgressValid(
+  actualValue: number,
+  targetValue: number,
+  direction: MetricDirection = "HIGHER_BETTER",
+): boolean {
+  if (!Number.isFinite(actualValue) || !Number.isFinite(targetValue)) return false;
+  return direction === "HIGHER_BETTER" ? actualValue >= targetValue : actualValue <= targetValue;
+}
+
+/**
+ * 按指标方向判定本次进度相对上一条进度的趋势。
+ * 高于/低于方向上的改善分别记为 UP/DOWN，差异在容差内记为 FLAT；
+ * 缺少可比较的上一条记录时返回 null（首次记录无法判定趋势）。
+ */
+export function classifyProgressTrend(input: {
+  current: number;
+  previous?: number | null;
+  direction: MetricDirection;
+  tolerance?: number;
+}): ProgressTrend | null {
+  const { current, previous, direction } = input;
+  if (!Number.isFinite(current) || previous == null || !Number.isFinite(previous)) return null;
+  const tolerance = input.tolerance ?? 0;
+  const delta = current - previous;
+  if (Math.abs(delta) <= tolerance) return "FLAT";
+  if (direction === "HIGHER_BETTER") return delta > 0 ? "UP" : "DOWN";
+  return delta < 0 ? "UP" : "DOWN";
+}
+
+/**
+ * 逾期判定与 Worker 每日扫描保持同一口径：
+ * 截止日期早于参考日零点（UTC）的 OPEN/IN_PROGRESS 目标为逾期。
+ */
+export function isGoalOverdue(input: {
+  status: GoalStatus;
+  dueDate: Date | string;
+  now?: Date;
+}): boolean {
+  if (!ACTIVE_GOAL_STATUSES.includes(input.status as (typeof ACTIVE_GOAL_STATUSES)[number])) return false;
+  const startOfToday = new Date(input.now ?? new Date());
+  startOfToday.setUTCHours(0, 0, 0, 0);
+  return new Date(input.dueDate) < startOfToday;
 }
 
 export function calculateSessionDuration(mediaDurationsMs: Array<number | null | undefined>): number {
