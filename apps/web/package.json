@@ -1,33 +1,25 @@
 {
-  "name": "@practice/web",
+  "name": "@heirloom/web",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build",
-    "preview": "vite preview",
-    "typecheck": "vue-tsc -b",
-    "test": "vitest run",
-    "test:e2e": "playwright test"
+    "build": "tsc -p tsconfig.json && vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@practice/contracts": "*",
-    "echarts": "^6.1.0",
-    "hash-wasm": "^4.12.0",
-    "pinia": "^4.0.3",
-    "vue": "^3.5.43",
-    "vue-router": "^5.3.1",
-    "wavesurfer.js": "^8.0.1"
+    "@tanstack/react-query": "^5.62.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2",
-    "@vitejs/plugin-vue": "^6.0.9",
-    "@vue/test-utils": "^2.5.1",
-    "jsdom": "^27.4.0",
-    "typescript": "^5.9.3",
-    "vite": "^8.3.1",
-    "vitest": "^4.1.11",
-    "vue-tsc": "^3.1.5"
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
   }
 }

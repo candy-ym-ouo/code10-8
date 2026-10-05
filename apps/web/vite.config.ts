@@ -1,23 +1,19 @@
-import { defineConfig } from "vitest/config";
-import vue from "@vitejs/plugin-vue";
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [react()],
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://localhost:3000", changeOrigin: true },
-      "/health": { target: "http://localhost:3000", changeOrigin: true },
+      '/api': {
+        target: process.env.VITE_API_TARGET ?? 'http://127.0.0.1:4000',
+        changeOrigin: true,
+      },
     },
   },
   build: {
-    target: "es2022",
+    outDir: 'dist',
     sourcemap: true,
-    // Statistics is a lazy-loaded route; its chart engine is intentionally isolated there.
-    chunkSizeWarningLimit: 650,
-  },
-  test: {
-    environment: "jsdom",
-    include: ["tests/**/*.test.ts"],
   },
 });

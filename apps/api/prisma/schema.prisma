@@ -7,307 +7,440 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum UserStatus {
-  ACTIVE
-  LOCKED
-  DELETING
+enum SystemRole {
+  sysadmin
+  user
 }
 
-enum SessionStatus {
-  DRAFT
-  IN_REVIEW
-  COMPLETED
-  ARCHIVED
-  DELETING
-  DELETE_FAILED
+enum AccountStatus {
+  active
+  disabled
+}
+
+enum FamilyRole {
+  owner
+  admin
+  editor
+  contributor
+  viewer
+}
+
+enum MemberStatus {
+  active
+  disabled
+}
+
+enum Category {
+  furniture
+  souvenir
+  receipt
+  manuscript
+  other
+}
+
+enum ItemStatus {
+  draft
+  published
+  archived
+  trashed
+}
+
+enum Visibility {
+  private
+  family
+  selected
+  link
+}
+
+enum Precision {
+  day
+  month
+  year
+  decade
+  unknown
+}
+
+enum MediaKind {
+  image
+  audio
+  document
 }
 
 enum MediaStatus {
-  PENDING_UPLOAD
-  UPLOADING
-  UPLOADED
-  PROCESSING
-  READY
-  FAILED
-  CANCELLED
+  processing
+  ready
+  failed
 }
 
-enum AnnotationType {
-  RHYTHM
-  FINGERING
-  EMOTION
+enum NoteType {
+  story
+  comment
+  correction
 }
 
-enum GoalCategory {
-  RHYTHM
-  FINGERING
-  EMOTION
-  CONTINUITY
-  PITCH
-  SPEED
-  REPERTOIRE
-  OTHER
+enum NoteStatus {
+  pending
+  accepted
+  rejected
 }
 
-enum MetricType {
-  DURATION
-  COUNT
-  SPEED
-  ACCURACY
-  SUBJECTIVE_SCORE
-  CUSTOM
+enum PersonRole {
+  source
+  gifted
+  inherited
+  owner
+  mentioned
 }
 
-enum EvidenceRequirement {
-  NONE
-  AUDIO
-  SELF_REVIEW
-  AUDIO_AND_SELF_REVIEW
+enum JobType {
+  media_thumbnail
+  media_waveform
+  export_build
+  trash_purge
+  storage_gc
 }
 
-enum ExportStatus {
-  PENDING
-  PROCESSING
-  READY
-  FAILED
-  EXPIRED
-}
-
-enum GoalStatus {
-  OPEN
-  IN_PROGRESS
-  ACHIEVED
-  MISSED
-  CANCELLED
+enum JobStatus {
+  queued
+  running
+  done
+  failed
 }
 
 model User {
-  id                String           @id @default(uuid()) @db.Uuid
-  email             String           @unique @db.VarChar(254)
-  passwordHash      String           @map("password_hash")
-  displayName       String           @map("display_name") @db.VarChar(80)
-  defaultInstrument String?          @map("default_instrument") @db.VarChar(60)
-  timezone          String           @default("Asia/Shanghai") @db.VarChar(64)
-  locale            String           @default("zh-CN") @db.VarChar(16)
-  status            UserStatus       @default(ACTIVE)
-  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
-  refreshSessions   RefreshSession[]
-  practiceSessions  PracticeSession[]
-  mediaAssets       MediaAsset[]
-  annotations       Annotation[]
-  goals             Goal[]
-  goalProgresses    GoalProgress[]
-  auditLogs         AuditLog[]
-  dataExports       DataExport[]
+  id           String        @id @default(cuid())
+  email        String        @unique
+  passwordHash String        @map("password_hash")
+  displayName  String        @map("display_name")
+  avatarColor  String        @default("#2F4858") @map("avatar_color")
+  systemRole   SystemRole    @default(user) @map("system_role")
+  status       AccountStatus @default(active)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  memberships   FamilyMember[]
+  items         Item[]
+  notes         ItemNote[]
+  versions      ItemVersion[]
+  auditLogs     AuditLog[]
+  refreshTokens RefreshToken[]
 
   @@map("users")
 }
 
-model RefreshSession {
-  id         String    @id @default(uuid()) @db.Uuid
-  userId     String    @map("user_id") @db.Uuid
-  familyId   String    @map("family_id") @db.Uuid
-  tokenHash  String    @unique @map("token_hash") @db.Char(64)
-  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
-  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(6)
-  replacedBy String?   @map("replaced_by") @db.Uuid
-  ipHash     String?   @map("ip_hash") @db.Char(64)
-  userAgent  String?   @map("user_agent") @db.VarChar(500)
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+model Family {
+  id                   String     @id @default(cuid())
+  name                 String
+  description          String?
+  defaultVisibility    Visibility @default(family) @map("default_visibility")
+  allowViewerComment   Boolean    @default(false) @map("allow_viewer_comment")
+  createdBy            String     @map("created_by")
+  createdAt            DateTime   @default(now()) @map("created_at")
+  updatedAt            DateTime   @updatedAt @map("updated_at")
+  deletedAt            DateTime?  @map("deleted_at")
 
-  @@index([userId, familyId])
-  @@index([expiresAt])
-  @@map("refresh_sessions")
+  members    FamilyMember[]
+  invites    Invite[]
+  people     Person[]
+  items      Item[]
+  shareLinks ShareLink[]
+  auditLogs  AuditLog[]
+  settings   Setting[]
+
+  @@map("families")
 }
 
-model PracticeSession {
-  id               String             @id @default(uuid()) @db.Uuid
-  userId           String             @map("user_id") @db.Uuid
-  title            String             @db.VarChar(120)
-  instrument       String             @db.VarChar(60)
-  focus            String?            @db.VarChar(500)
-  location         String?            @db.VarChar(120)
-  notes            String?
-  startedAt        DateTime           @map("started_at") @db.Timestamptz(6)
-  actualDurationMs BigInt             @default(0) @map("actual_duration_ms")
-  status           SessionStatus      @default(DRAFT)
-  completedAt      DateTime?          @map("completed_at") @db.Timestamptz(6)
-  archivedAt       DateTime?          @map("archived_at") @db.Timestamptz(6)
-  version          Int                @default(0)
-  createdAt        DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  mediaAssets      MediaAsset[]
-  annotations      Annotation[]
-  goals            Goal[]
-  goalProgresses   GoalProgress[]
-  review           SessionReview?
+model FamilyMember {
+  id       String       @id @default(cuid())
+  familyId String       @map("family_id")
+  userId   String       @map("user_id")
+  role     FamilyRole
+  status   MemberStatus @default(active)
+  joinedAt DateTime     @default(now()) @map("joined_at")
 
-  @@index([userId, status, startedAt(sort: Desc)])
-  @@index([userId, instrument])
-  @@index([userId, completedAt])
-  @@map("practice_sessions")
+  family Family @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([familyId, userId])
+  @@index([userId])
+  @@map("family_members")
 }
 
-model MediaAsset {
-  id             String          @id @default(uuid()) @db.Uuid
-  userId         String          @map("user_id") @db.Uuid
-  sessionId      String          @map("session_id") @db.Uuid
-  status         MediaStatus     @default(PENDING_UPLOAD)
-  objectKey      String          @map("object_key")
-  originalName   String          @map("original_name") @db.VarChar(255)
-  mimeType       String          @map("mime_type") @db.VarChar(100)
-  sizeBytes      BigInt          @map("size_bytes")
-  sha256         String          @db.Char(64)
-  durationMs     BigInt?         @map("duration_ms")
-  codec          String?         @db.VarChar(64)
-  sampleRate     Int?            @map("sample_rate")
-  channels       Int?            @db.SmallInt
-  peaks          Json?
-  failureCode    String?         @map("failure_code") @db.VarChar(64)
-  failureMessage String?         @map("failure_message") @db.VarChar(500)
-  uploadedAt     DateTime?       @map("uploaded_at") @db.Timestamptz(6)
-  processedAt    DateTime?       @map("processed_at") @db.Timestamptz(6)
-  expiresAt      DateTime?       @map("expires_at") @db.Timestamptz(6)
-  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  session        PracticeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  annotations    Annotation[]
-  goalProgresses GoalProgress[]
+model Invite {
+  id        String    @id @default(cuid())
+  familyId  String    @map("family_id")
+  codeHash  String    @unique @map("code_hash")
+  role      FamilyRole
+  note      String?
+  expiresAt DateTime  @map("expires_at")
+  maxUses   Int       @default(1) @map("max_uses")
+  usedCount Int       @default(0) @map("used_count")
+  createdBy String    @map("created_by")
+  createdAt DateTime  @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
 
-  @@index([userId, sha256])
-  @@index([objectKey])
-  @@index([sessionId, status])
-  @@index([expiresAt])
-  @@map("media_assets")
+  family Family @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+  @@index([familyId, createdAt])
+  @@map("invites")
 }
 
-model Annotation {
-  id          String         @id @default(uuid()) @db.Uuid
-  userId      String         @map("user_id") @db.Uuid
-  sessionId   String         @map("session_id") @db.Uuid
-  mediaId     String         @map("media_id") @db.Uuid
-  type        AnnotationType
-  severity    Int            @db.SmallInt
-  startMs     BigInt         @map("start_ms")
-  endMs       BigInt         @map("end_ms")
-  title       String         @db.VarChar(80)
-  description String?
-  nextAction  String?        @map("next_action")
-  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  session     PracticeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  media       MediaAsset     @relation(fields: [mediaId], references: [id], onDelete: Cascade)
-  goals       Goal[]
+model Person {
+  id            String    @id @default(cuid())
+  familyId      String    @map("family_id")
+  name          String
+  relation      String?
+  birthYear     Int?      @map("birth_year")
+  deathYear     Int?      @map("death_year")
+  bio           String?
+  avatarMediaId String?   @map("avatar_media_id")
+  mergedIntoId  String?   @map("merged_into_id")
+  createdBy     String    @map("created_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
 
-  @@index([mediaId, startMs])
-  @@index([userId, type])
-  @@index([sessionId, severity])
-  @@map("annotations")
+  family Family       @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  links  ItemPerson[]
+
+  @@index([familyId, name])
+  @@map("people")
 }
 
-model Goal {
-  id                 String              @id @default(uuid()) @db.Uuid
-  userId             String              @map("user_id") @db.Uuid
-  sourceSessionId    String              @map("source_session_id") @db.Uuid
-  annotationId       String?             @map("annotation_id") @db.Uuid
-  title              String              @db.VarChar(160)
-  category           GoalCategory
-  metricType         MetricType          @map("metric_type")
-  baselineValue      Decimal?            @map("baseline_value") @db.Decimal(14, 4)
-  targetValue        Decimal             @map("target_value") @db.Decimal(14, 4)
-  unit               String              @db.VarChar(24)
-  dueDate            DateTime            @map("due_date") @db.Date
-  method             String?
-  evidenceRequirement EvidenceRequirement @map("evidence_requirement")
-  status             GoalStatus          @default(OPEN)
-  completedAt        DateTime?           @map("completed_at") @db.Timestamptz(6)
-  cancelledReason    String?             @map("cancelled_reason")
-  version            Int                 @default(0)
-  createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sourceSession      PracticeSession     @relation(fields: [sourceSessionId], references: [id], onDelete: Cascade)
-  annotation         Annotation?         @relation(fields: [annotationId], references: [id], onDelete: SetNull)
-  progresses         GoalProgress[]
+model Item {
+  id                String     @id @default(cuid())
+  familyId          String     @map("family_id")
+  title             String
+  category          Category
+  status            ItemStatus @default(draft)
+  visibility        Visibility @default(family)
+  acquiredAt        DateTime?  @map("acquired_at")
+  acquiredPrecision Precision  @default(unknown) @map("acquired_precision")
+  acquiredLabel     String?    @map("acquired_label")
+  acquiredNote      String?    @map("acquired_note")
+  placeText         String?    @map("place_text")
+  placeCity         String?    @map("place_city")
+  placeProvince     String?    @map("place_province")
+  placeCountry      String?    @map("place_country")
+  placeLat          Decimal?   @map("place_lat") @db.Decimal(9, 6)
+  placeLng          Decimal?   @map("place_lng") @db.Decimal(9, 6)
+  storyHtml         String?    @map("story_html")
+  storyText         String?    @map("story_text")
+  condition         String?
+  storageLocation   String?    @map("storage_location")
+  tags              String[]   @default([])
+  coverMediaId      String?    @map("cover_media_id")
+  sortAt            DateTime   @map("sort_at")
+  createdBy         String     @map("created_by")
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+  deletedAt         DateTime?  @map("deleted_at")
 
-  @@index([userId, status, dueDate])
-  @@index([sourceSessionId])
-  @@map("goals")
+  family  Family       @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  creator User         @relation(fields: [createdBy], references: [id])
+  people  ItemPerson[]
+  media   ItemMedia[]
+  notes   ItemNote[]
+  shares  ItemShare[]
+  versions ItemVersion[]
+  shareLinks ShareLinkItem[]
+
+  @@index([familyId, status, category])
+  @@index([familyId, sortAt])
+  @@index([familyId, updatedAt])
+  @@map("items")
 }
 
-model GoalProgress {
-  id              String          @id @default(uuid()) @db.Uuid
-  userId          String          @map("user_id") @db.Uuid
-  goalId          String          @map("goal_id") @db.Uuid
-  sessionId       String          @map("session_id") @db.Uuid
-  evidenceMediaId String?         @map("evidence_media_id") @db.Uuid
-  actualValue     Decimal         @map("actual_value") @db.Decimal(14, 4)
-  note            String?
-  recordedAt      DateTime        @default(now()) @map("recorded_at") @db.Timestamptz(6)
-  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  goal            Goal            @relation(fields: [goalId], references: [id], onDelete: Cascade)
-  session         PracticeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  evidenceMedia   MediaAsset?     @relation(fields: [evidenceMediaId], references: [id], onDelete: SetNull)
+model ItemPerson {
+  id       String     @id @default(cuid())
+  itemId   String     @map("item_id")
+  personId String     @map("person_id")
+  role     PersonRole @default(source)
 
-  @@index([goalId, recordedAt])
-  @@index([sessionId])
-  @@map("goal_progress")
+  item   Item   @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, personId, role])
+  @@index([personId])
+  @@map("item_people")
 }
 
-model SessionReview {
-  id                      String          @id @default(uuid()) @db.Uuid
-  sessionId               String          @unique @map("session_id") @db.Uuid
-  goodPoints              String?         @map("good_points")
-  mainIssues              String?         @map("main_issues")
-  nextFocus               String?         @map("next_focus") @db.VarChar(500)
-  noIssues                Boolean         @default(false) @map("no_issues")
-  suggestedNextPracticeAt DateTime?       @map("suggested_next_practice_at") @db.Timestamptz(6)
-  completedAt             DateTime?       @map("completed_at") @db.Timestamptz(6)
-  createdAt               DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt               DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
-  session                 PracticeSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+model ItemMedia {
+  id          String      @id @default(cuid())
+  itemId      String      @map("item_id")
+  kind        MediaKind
+  status      MediaStatus @default(processing)
+  storageKey  String      @map("storage_key")
+  sha256      String
+  mimeType    String      @map("mime_type")
+  byteSize    BigInt      @map("byte_size")
+  width       Int?
+  height      Int?
+  durationMs  Int?        @map("duration_ms")
+  thumbKey    String?     @map("thumb_key")
+  largeKey    String?     @map("large_key")
+  transcodeKey String?    @map("transcode_key")
+  waveformKey String?     @map("waveform_key")
+  originalName String     @map("original_name")
+  caption     String?
+  transcript  String?
+  sortOrder   Int         @default(0) @map("sort_order")
+  lastError   String?     @map("last_error")
+  createdBy   String      @map("created_by")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  deletedAt   DateTime?   @map("deleted_at")
 
-  @@map("session_reviews")
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId, sortOrder])
+  @@index([sha256])
+  @@map("item_media")
 }
 
-model DataExport {
-  id         String        @id @default(uuid()) @db.Uuid
-  userId     String        @map("user_id") @db.Uuid
-  format     String        @db.VarChar(8)
-  status     ExportStatus  @default(PENDING)
-  objectKey  String?       @map("object_key") @db.Text
-  failure    String?       @db.VarChar(500)
-  expiresAt  DateTime?     @map("expires_at") @db.Timestamptz(6)
-  createdAt  DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt  DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
-  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+model ItemNote {
+  id           String     @id @default(cuid())
+  itemId       String     @map("item_id")
+  authorId     String     @map("author_id")
+  type         NoteType   @default(story)
+  body         String
+  status       NoteStatus @default(pending)
+  rejectReason String?    @map("reject_reason")
+  decidedBy    String?    @map("decided_by")
+  decidedAt    DateTime?  @map("decided_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
 
-  @@index([userId, createdAt(sort: Desc)])
-  @@map("data_exports")
+  item   Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id])
+
+  @@index([itemId, createdAt])
+  @@map("item_notes")
+}
+
+model ItemShare {
+  id        String   @id @default(cuid())
+  itemId    String   @map("item_id")
+  userId    String   @map("user_id")
+  canEdit   Boolean  @default(false) @map("can_edit")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, userId])
+  @@index([userId])
+  @@map("item_shares")
+}
+
+model ItemVersion {
+  id        String   @id @default(cuid())
+  itemId    String   @map("item_id")
+  version   Int
+  snapshot  Json
+  createdBy String   @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  item    Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  creator User @relation(fields: [createdBy], references: [id])
+
+  @@unique([itemId, version])
+  @@map("item_versions")
+}
+
+model ShareLink {
+  id           String    @id @default(cuid())
+  familyId     String    @map("family_id")
+  tokenHash    String    @unique @map("token_hash")
+  passwordHash String?   @map("password_hash")
+  label        String?
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  accessCount  Int       @default(0) @map("access_count")
+  lastAccessAt DateTime? @map("last_access_at")
+  createdBy    String    @map("created_by")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  family Family          @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  items  ShareLinkItem[]
+
+  @@index([familyId, createdAt])
+  @@map("share_links")
+}
+
+model ShareLinkItem {
+  shareLinkId String @map("share_link_id")
+  itemId      String @map("item_id")
+
+  shareLink ShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Cascade)
+  item      Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@id([shareLinkId, itemId])
+  @@map("share_link_items")
 }
 
 model AuditLog {
-  id         String   @id @default(uuid()) @db.Uuid
-  userId     String?  @map("user_id") @db.Uuid
-  action     String   @db.VarChar(80)
-  resource   String   @db.VarChar(80)
-  resourceId String?  @map("resource_id") @db.Uuid
-  result     String   @db.VarChar(32)
-  ipHash     String?  @map("ip_hash") @db.Char(64)
-  traceId    String?  @map("trace_id") @db.VarChar(80)
-  metadata   Json?
-  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  id         String   @id @default(cuid())
+  familyId   String?  @map("family_id")
+  actorId    String   @map("actor_id")
+  action     String
+  targetType String   @map("target_type")
+  targetId   String?  @map("target_id")
+  diff       Json?
+  ip         String?
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now()) @map("created_at")
 
-  @@index([userId, createdAt(sort: Desc)])
-  @@index([action, createdAt(sort: Desc)])
+  family Family? @relation(fields: [familyId], references: [id], onDelete: SetNull)
+  actor  User    @relation(fields: [actorId], references: [id])
+
+  @@index([familyId, createdAt])
+  @@index([actorId, createdAt])
   @@map("audit_logs")
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  familyId    String?   @map("family_id")
+  type        JobType
+  payload     Json
+  status      JobStatus @default(queued)
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3) @map("max_attempts")
+  progress    Int       @default(0)
+  result      Json?
+  lastError   String?   @map("last_error")
+  runAfter    DateTime  @default(now()) @map("run_after")
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, runAfter])
+  @@map("jobs")
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  userAgent String?   @map("user_agent")
+  ip        String?
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Setting {
+  familyId  String   @map("family_id")
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  family Family @relation(fields: [familyId], references: [id], onDelete: Cascade)
+
+  @@id([familyId, key])
+  @@map("settings")
 }
