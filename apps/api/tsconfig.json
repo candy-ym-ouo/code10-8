@@ -1,21 +1,15 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "declaration": false,
     "outDir": "dist",
     "rootDir": "src",
-    "sourceMap": true,
-    "noEmit": false,
-    "types": [
-      "node"
-    ],
-    "exactOptionalPropertyTypes": false
+    "baseUrl": "."
   },
-  "include": [
-    "src/**/*.ts"
-  ],
-  "exclude": [
-    "test"
-  ]
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "src/**/*.test.ts"]
 }

@@ -1,0 +1,38 @@
+:root {
+  --bg: #faf7f2;
+  --surface: #ffffff;
+  --surface-2: #f3efe8;
+  --ink: #1f1b16;
+  --ink-2: #5a5347;
+  --ink-3: #8b8377;
+  --line: #e3ddd2;
+  --primary: #2f4858;
+  --primary-soft: #e8eef1;
+  --accent: #a44a3f;
+  --accent-soft: #f7e9e6;
+  --success: #3f6b4a;
+  --success-soft: #e8f0e9;
+  --warn: #8a6d3b;
+  --warn-soft: #f7f0e0;
+  --danger: #a33a2f;
+
+  --radius-sm: 4px;
+  --radius: 8px;
+  --shadow-sm: 0 1px 2px rgba(31, 27, 22, 0.06);
+  --shadow: 0 4px 16px rgba(31, 27, 22, 0.08);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --font: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-title: "Songti SC", "STSong", "Noto Serif SC", Georgia, serif;
+
+  --header-h: 60px;
+  --content-max: 1100px;
+}
+

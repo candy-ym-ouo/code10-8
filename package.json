@@ -1,32 +1,34 @@
 {
-  "name": "practice-review-notebook",
+  "name": "heirloom",
   "version": "1.0.0",
   "private": true,
-  "description": "乐器练习复盘本：Vue 3 + Fastify + PostgreSQL 的完整练习闭环应用",
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
+  "description": "家中物品来历册 - 为旧家具、纪念品、票据和手稿建立带图片/文字/音频的家庭档案",
+  "packageManager": "pnpm@9.12.0",
   "engines": {
-    "node": ">=22.0.0",
-    "npm": ">=10.0.0"
+    "node": ">=20"
   },
   "scripts": {
-    "dev": "concurrently -n web,api,worker -c cyan,green,yellow \"npm run dev -w @practice/web\" \"npm run dev -w @practice/api\" \"npm run dev -w @practice/worker\"",
-    "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
-    "test:e2e": "npm run test:e2e -w @practice/web",
-    "db:generate": "npm run prisma:generate -w @practice/api",
-    "db:migrate": "npm run prisma:migrate -w @practice/api",
-    "db:deploy": "npm run prisma:deploy -w @practice/api",
-    "db:studio": "npm run prisma:studio -w @practice/api",
-    "predev": "npm run build -w @practice/contracts",
-    "pretypecheck": "npm run build -w @practice/contracts",
-    "prebuild": "npm run build -w @practice/contracts"
+    "dev": "pnpm --parallel --filter @heirloom/api --filter @heirloom/web dev",
+    "build": "pnpm --filter @heirloom/shared build && pnpm --filter @heirloom/api build && pnpm --filter @heirloom/web build",
+    "start": "node apps/api/dist/index.js",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @heirloom/shared test && pnpm --filter @heirloom/api test",
+    "db:migrate": "pnpm --filter @heirloom/api db:migrate",
+    "db:deploy": "pnpm --filter @heirloom/api db:deploy",
+    "db:studio": "pnpm --filter @heirloom/api db:studio",
+    "db:init": "bash scripts/pg.sh init",
+    "db:start": "bash scripts/pg.sh start",
+    "db:stop": "bash scripts/pg.sh stop",
+    "db:status": "bash scripts/pg.sh status",
+    "db:psql": "bash scripts/pg.sh psql",
+    "backup": "bash scripts/backup.sh",
+    "restore": "bash scripts/restore.sh",
+    "backup:drill": "bash scripts/drill.sh",
+    "gc": "bash scripts/gc.sh",
+    "verify:loop": "bash scripts/verify-loop.sh",
+    "test:ui": "node e2e/ui-smoke.mjs"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1",
-    "typescript": "^5.9.3"
+    "playwright-core": "^1.49.0"
   }
 }

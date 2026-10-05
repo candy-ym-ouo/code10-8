@@ -1,43 +1,64 @@
-import { randomUUID } from "node:crypto";
-import type { FastifyPluginAsync } from "fastify";
-import { createExportSchema } from "@practice/contracts";
-import { getConfig } from "../config/env.js";
-import { notFound } from "../lib/errors.js";
-import { prisma } from "../lib/prisma.js";
-import { enqueueExport } from "../lib/queue.js";
-import { createPlaybackUrl } from "../lib/s3.js";
-import { parseOrThrow } from "../lib/validation.js";
+import { Router } from 'express';
+import fsp from 'node:fs/promises';
+import { asyncHandler } from '../http/asyncHandler';
+import { clientMeta, currentUser } from '../middleware/auth';
+import { familyCtx, requireFamily } from '../middleware/family';
+import { writeLimiter } from '../middleware/rateLimit';
+import { sendFilePath } from '../http/sendFile';
+import * as exportService from '../services/exportService';
+import * as audit from '../services/auditService';
+import { notFound } from '../http/errors';
 
-const exportRoutes: FastifyPluginAsync = async (app) => {
-  app.addHook("preHandler", app.authenticate);
+export const exportsRouter = Router({ mergeParams: true });
 
-  app.post("/", async (request, reply) => {
-    const input = parseOrThrow(createExportSchema, request.body);
-    const id = randomUUID();
-    const objectKey = `users/${request.authUser!.id}/exports/${id}.${input.format}`;
-    const task = await prisma.dataExport.create({
-      data: {
-        id,
-        userId: request.authUser!.id,
-        format: input.format,
-        objectKey,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
-      },
+exportsRouter.post(
+  '/',
+  requireFamily('family:export'),
+  writeLimiter,
+  asyncHandler(async (req, res) => {
+    const user = currentUser(req);
+    const ctx = familyCtx(req);
+    const job = await exportService.createExportJob(user.id, ctx, clientMeta(req));
+    res.status(202).json(job);
+  }),
+);
+
+exportsRouter.get(
+  '/:jobId',
+  requireFamily('family:export'),
+  asyncHandler(async (req, res) => {
+    const ctx = familyCtx(req);
+    res.json({ job: await exportService.getExportJob(ctx.familyId, req.params.jobId!) });
+  }),
+);
+
+exportsRouter.get(
+  '/:jobId/download',
+  requireFamily('family:export'),
+  asyncHandler(async (req, res) => {
+    const user = currentUser(req);
+    const ctx = familyCtx(req);
+    const job = await exportService.getExportJob(ctx.familyId, req.params.jobId!);
+    if (job.status !== 'done') throw notFound('导出包尚未生成完成');
+    const file = exportService.exportZipPath(ctx.familyId, job.jobId);
+    const stat = await fsp.stat(file).catch(() => null);
+    if (!stat) throw notFound('导出包已被清理，请重新导出');
+    await audit.record({
+      familyId: ctx.familyId,
+      actorId: user.id,
+      action: 'export.download',
+      targetType: 'job',
+      targetId: job.jobId,
+      ...clientMeta(req),
     });
-    await enqueueExport(id);
-    return reply.status(202).send({ export: task });
-  });
-
-  app.get("/:id", async (request) => {
-    const { id } = request.params as { id: string };
-    const task = await prisma.dataExport.findFirst({ where: { id, userId: request.authUser!.id } });
-    if (!task) throw notFound();
-    if (task.status === "READY" && task.objectKey) {
-      const url = await createPlaybackUrl(task.objectKey, `practice-export.${task.format}`, task.format === "csv" ? "text/csv; charset=utf-8" : "application/json; charset=utf-8");
-      return { export: task, downloadUrl: url, expiresIn: getConfig().PLAYBACK_URL_TTL_SECONDS };
-    }
-    return { export: task };
-  });
-};
-
-export default exportRoutes;
+    // 支持 Range 断点续传：下载中断后客户端可拿着 ETag 从上次的位置继续
+    sendFilePath(req, res, {
+      absPath: file,
+      size: stat.size,
+      mimeType: 'application/zip',
+      filename: `heirloom-export-${job.jobId}.zip`,
+      download: true,
+      etag: `"${job.jobId}-${stat.size}-${Math.round(stat.mtimeMs)}"`,
+    });
+  }),
+);

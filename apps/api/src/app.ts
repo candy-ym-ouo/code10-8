@@ -1,102 +1,169 @@
-import "./lib/serialization.js";
-import Fastify, { type FastifyError } from "fastify";
-import cookie from "@fastify/cookie";
-import cors from "@fastify/cors";
-import helmet from "@fastify/helmet";
-import rateLimit from "@fastify/rate-limit";
-import { Prisma } from "@prisma/client";
-import { ZodError } from "zod";
-import { getConfig } from "./config/env.js";
-import { AppError, sendError } from "./lib/errors.js";
-import authPlugin from "./plugins/auth.js";
-import prismaPlugin from "./plugins/prisma.js";
-import requestContext from "./plugins/request-context.js";
-import authRoutes from "./routes/auth.js";
-import userRoutes from "./routes/users.js";
-import sessionRoutes from "./routes/sessions.js";
-import mediaRoutes from "./routes/media.js";
-import annotationRoutes from "./routes/annotations.js";
-import reviewRoutes from "./routes/review.js";
-import goalRoutes from "./routes/goals.js";
-import statisticsRoutes from "./routes/statistics.js";
-import exportRoutes from "./routes/exports.js";
-import healthRoutes from "./routes/health.js";
-import metricsRoutes, { metricsState } from "./routes/metrics.js";
+import express from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
+import cookieParser from 'cookie-parser';
+import cors from 'cors';
+import helmet from 'helmet';
+import pinoHttp from 'pino-http';
+import { randomUUID } from 'node:crypto';
+import { config } from './config';
+import { logger } from './logger';
+import { attachUser } from './middleware/auth';
+import { csrfGuard } from './middleware/csrf';
+import { errorHandler, notFoundHandler } from './middleware/errorHandler';
+import { authRouter } from './routes/auth';
+import { familiesRouter } from './routes/families';
+import { itemsRouter } from './routes/items';
+import { mediaRouter } from './routes/media';
+import { peopleRouter } from './routes/people';
+import { shareLinksRouter } from './routes/shareLinks';
+import { exportsRouter } from './routes/exports';
+import { invitesRouter } from './routes/invites';
+import { publicRouter } from './routes/public';
+import { prisma } from './db';
+import { exists, ensureDirs, writeJson } from './storage/local';
+import { hasFfmpeg } from './media/audio';
 
-export async function buildApp() {
-  const config = getConfig();
-  const app = Fastify({
-    logger: {
-      level: config.LOG_LEVEL,
-      redact: {
-        paths: [
-          "req.headers.authorization",
-          "req.headers.cookie",
-          "res.headers.set-cookie",
-          "*.password",
-          "*.refreshToken",
-          "*.accessToken",
-          "*.uploadUrl",
-          "*.downloadUrl",
-        ],
-        censor: "[REDACTED]",
+export function createApp() {
+  const app = express();
+  app.set('trust proxy', 1);
+
+  app.use((req, res, next) => {
+    const id = req.header('x-request-id') ?? randomUUID();
+    req.requestId = id;
+    res.setHeader('X-Request-Id', id);
+    next();
+  });
+
+  app.use(
+    pinoHttp({
+      logger,
+      genReqId: (req) => (req as express.Request).requestId,
+      autoLogging: { ignore: (req) => req.url === '/healthz' || req.url === '/readyz' },
+      // 只记录排查需要的字段，避免把整个 header（含 Cookie）灌进日志
+      serializers: {
+        req: (req: express.Request) => ({ id: req.id, method: req.method, url: req.url }),
+        res: (res: express.Response) => ({ statusCode: res.statusCode }),
       },
-    },
-    trustProxy: true,
-    requestIdHeader: "x-request-id",
-    bodyLimit: 1024 * 1024,
+    }),
+  );
+
+  app.use(
+    helmet({
+      // 前端由本进程托管（或由反向代理托管）；CSP 交给部署层按需下发
+      contentSecurityPolicy: false,
+      crossOriginResourcePolicy: { policy: 'same-site' },
+    }),
+  );
+  app.use(
+    cors({
+      origin: config.isProd ? [config.APP_URL] : true,
+      credentials: true,
+    }),
+  );
+  app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: false, limit: '1mb' }));
+  app.use(cookieParser());
+
+  app.get('/healthz', (_req, res) => {
+    res.json({ status: 'ok', app: config.APP_NAME, env: config.NODE_ENV });
   });
 
-  await app.register(cookie, { secret: config.REFRESH_TOKEN_PEPPER });
-  await app.register(cors, {
-    origin: config.WEB_ORIGIN,
-    credentials: true,
-    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["content-type", "authorization", "x-request-id", "x-idempotency-key"],
-    exposedHeaders: ["x-request-id"],
-  });
-  await app.register(helmet, { contentSecurityPolicy: false });
-  await app.register(rateLimit, { global: true, max: 300, timeWindow: "1 minute" });
-  await app.register(prismaPlugin);
-  await app.register(requestContext);
-  await app.register(authPlugin);
-
-  app.addHook("onResponse", async (_request, reply) => {
-    metricsState.requests += 1;
-    if (reply.statusCode >= 500) metricsState.errors += 1;
-  });
-
-  app.setErrorHandler((error: FastifyError | AppError | ZodError, request, reply) => {
-    if (error instanceof AppError) return sendError(reply, error, request.id);
-    if (error instanceof ZodError) {
-      return sendError(reply, new AppError(400, "VALIDATION_ERROR", "请求字段不合法", error.issues), request.id);
+  app.get('/readyz', async (_req, res) => {
+    const checks: Record<string, string> = {};
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      checks.db = 'ok';
+    } catch {
+      checks.db = 'fail';
     }
-    if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      if (error.code === "P2002") {
-        return sendError(reply, new AppError(409, "RESOURCE_CONFLICT", "资源已存在"), request.id);
-      }
-      if (error.code === "P2025") {
-        return sendError(reply, new AppError(404, "RESOURCE_NOT_FOUND", "资源不存在或无权访问"), request.id);
-      }
+    try {
+      await ensureDirs();
+      const probe = `${config.STORAGE_ROOT}/.probe.json`;
+      await writeJson('.probe.json', { at: new Date().toISOString() });
+      checks.storage = (await exists('.probe.json')) ? 'ok' : 'fail';
+      void probe;
+    } catch {
+      checks.storage = 'fail';
     }
-    if ("statusCode" in error && error.statusCode === 429) return sendError(reply, new AppError(429, "RATE_LIMITED", "请求过于频繁，请稍后重试"), request.id);
-    request.log.error({ err: error }, "unhandled request error");
-    return sendError(reply, new AppError(500, "INTERNAL_ERROR", "服务暂时不可用，请稍后重试"), request.id);
+    try {
+      const lastJob = await prisma.job.findFirst({ orderBy: { updatedAt: 'desc' } });
+      const stuck = lastJob?.status === 'running' && Date.now() - lastJob.updatedAt.getTime() > 10 * 60_000;
+      checks.worker = config.WORKER_ENABLED ? (stuck ? 'stalled' : 'ok') : 'disabled';
+    } catch {
+      checks.worker = 'fail';
+    }
+    const healthy = checks.db === 'ok' && checks.storage === 'ok' && checks.worker !== 'fail';
+    res.status(healthy ? 200 : 503).json({ status: healthy ? 'ok' : 'degraded', checks });
   });
 
-  app.setNotFoundHandler((request, reply) => sendError(reply, new AppError(404, "RESOURCE_NOT_FOUND", "接口不存在"), request.id));
+  app.get('/api/v1/system/info', async (req, res, next) => {
+    try {
+      if (!req.user || req.user.systemRole !== 'sysadmin') {
+        res.status(403).json({ error: { code: 'FORBIDDEN', message: '仅系统管理员可查看' } });
+        return;
+      }
+      const [users, families, items, jobs] = await Promise.all([
+        prisma.user.count(),
+        prisma.family.count({ where: { deletedAt: null } }),
+        prisma.item.count({ where: { status: { not: 'trashed' } } }),
+        prisma.job.groupBy({ by: ['status'], _count: true }),
+      ]);
+      res.json({
+        version: process.env.npm_package_version ?? '1.0.0',
+        node: process.version,
+        env: config.NODE_ENV,
+        ffmpeg: (await hasFfmpeg()) ? 'available' : 'missing',
+        counts: { users, families, items },
+        jobs: jobs.map((j) => ({ status: j.status, count: j._count })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
 
-  await app.register(healthRoutes, { prefix: "/health" });
-  if (config.METRICS_ENABLED) await app.register(metricsRoutes, { prefix: "/metrics" });
-  await app.register(authRoutes, { prefix: "/api/v1/auth" });
-  await app.register(userRoutes, { prefix: "/api/v1/users" });
-  await app.register(sessionRoutes, { prefix: "/api/v1/sessions" });
-  await app.register(mediaRoutes, { prefix: "/api/v1" });
-  await app.register(annotationRoutes, { prefix: "/api/v1" });
-  await app.register(reviewRoutes, { prefix: "/api/v1" });
-  await app.register(goalRoutes, { prefix: "/api/v1/goals" });
-  await app.register(statisticsRoutes, { prefix: "/api/v1/statistics" });
-  await app.register(exportRoutes, { prefix: "/api/v1/exports" });
+  app.use('/api/v1/auth', csrfGuard, attachUser, authRouter);
+  app.use('/api/v1/families', csrfGuard, attachUser, familiesRouter);
+  app.use('/api/v1/families/:fid/items', csrfGuard, attachUser, itemsRouter);
+  app.use('/api/v1/families/:fid/people', csrfGuard, attachUser, peopleRouter);
+  app.use('/api/v1/families/:fid/media', csrfGuard, attachUser, mediaRouter);
+  app.use('/api/v1/families/:fid/share-links', csrfGuard, attachUser, shareLinksRouter);
+  app.use('/api/v1/families/:fid/exports', csrfGuard, attachUser, exportsRouter);
+  app.use('/api/v1/invites', csrfGuard, attachUser, invitesRouter);
+  app.use('/api/v1/public', csrfGuard, attachUser, publicRouter);
 
+  /**
+   * 前端静态资源：pnpm build 之后，API 可以直接把 apps/web/dist 托管出去，
+   * 单进程就是一个完整应用，不需要额外的前置服务器。
+   * 开发时用 Vite dev server（5173）即可，这里检测不到产物会自动跳过。
+   */
+  const indexHtml = path.join(config.WEB_DIST, 'index.html');
+  if (config.SERVE_WEB && fs.existsSync(indexHtml)) {
+    app.use(
+      express.static(config.WEB_DIST, {
+        index: false,
+        setHeaders: (res, filePath) => {
+          if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+          } else {
+            res.setHeader('Cache-Control', 'no-cache');
+          }
+        },
+      }),
+    );
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path === '/healthz' || req.path === '/readyz') return next();
+      res.sendFile(indexHtml, { headers: { 'Cache-Control': 'no-cache' } });
+    });
+    logger.info({ webDist: config.WEB_DIST }, '已托管前端构建产物');
+  } else if (config.SERVE_WEB) {
+    logger.warn(
+      { webDist: config.WEB_DIST },
+      '未找到前端构建产物（先执行 pnpm build），当前只提供 API',
+    );
+  }
+
+  app.use(notFoundHandler);
+  app.use(errorHandler);
   return app;
 }
